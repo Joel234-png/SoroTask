@@ -1,6 +1,11 @@
 require('@testing-library/jest-dom')
 const React = require('react')
 
+// jsdom doesn't expose structuredClone, which fake-indexeddb relies on.
+if (typeof global.structuredClone !== 'function') {
+  global.structuredClone = (value) => JSON.parse(JSON.stringify(value))
+}
+
 if (typeof global.fetch !== 'function') {
   global.fetch = jest.fn(() =>
     Promise.resolve({
