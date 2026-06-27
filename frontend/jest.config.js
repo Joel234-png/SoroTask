@@ -37,6 +37,8 @@ const customConfig = {
     '<rootDir>/app/**/*.{spec,test}.{js,jsx,ts,tsx}',
     '<rootDir>/src/**/__tests__/**/*.{js,jsx,ts,tsx}',
     '<rootDir>/src/**/*.{spec,test}.{js,jsx,ts,tsx}',
+    '<rootDir>/__tests__/**/*.{js,jsx,ts,tsx}',
+    '<rootDir>/__tests__/**/*.{spec,test}.{js,jsx,ts,tsx}',
   ],
   moduleNameMapper: {
     '^@/(.*)$': '<rootDir>/$1',
