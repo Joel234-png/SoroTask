@@ -59,6 +59,17 @@ describe('ActionBlockCard', () => {
     expect(screen.getByLabelText(/min_amount/)).toBeInTheDocument();
   });
 
+  it('renders a select for boolean parameters', () => {
+    renderCard({
+      block: {
+        ...BASE_BLOCK,
+        inputs: [{ name: 'approve', type: 'bool' }],
+        args: {},
+      },
+    });
+    expect(screen.getByLabelText(/approve/)).toBeInstanceOf(HTMLSelectElement);
+  });
+
   it('shows "Needs input" when not configured', () => {
     renderCard();
     expect(screen.getByText('Needs input')).toBeInTheDocument();
