@@ -113,6 +113,7 @@ export function WalletButton() {
           aria-expanded={showDisconnect}
           aria-haspopup="true"
           aria-label={`Wallet connected: ${session.address}`}
+          data-testid="wallet-connected-button"
           className="flex items-center gap-2 bg-neutral-800 hover:bg-neutral-700 border border-neutral-700 text-neutral-100 px-4 py-2 rounded-md font-medium transition-colors"
         >
           {/* Green connected dot */}
@@ -163,6 +164,8 @@ export function WalletButton() {
   // -------------------------------------------------------------------------
   return (
     <button
+      id="connect-wallet-btn"
+      data-testid="connect-wallet-button"
       onClick={connect}
       disabled={isLoading}
       className="bg-neutral-100 text-neutral-900 px-4 py-2 rounded-md font-medium hover:bg-neutral-200 transition-colors disabled:opacity-50 disabled:cursor-not-allowed"

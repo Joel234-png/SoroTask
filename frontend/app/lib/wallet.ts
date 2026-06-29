@@ -50,11 +50,31 @@ export class WalletConnectionError extends Error {
 export const EXPECTED_NETWORK_PASSPHRASE =
   "Test SDF Future Network ; October 2022";
 
+const E2E_MOCK_ADDRESS =
+  "GAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA";
+
+function isE2EMockWalletEnabled(): boolean {
+  return process.env.NEXT_PUBLIC_E2E_MOCK_WALLET === "true";
+}
+
+function getE2EMockSession(): WalletSession {
+  return {
+    address: E2E_MOCK_ADDRESS,
+    network: {
+      network: "Futurenet",
+      networkUrl: "https://horizon-futurenet.stellar.org",
+      networkPassphrase: EXPECTED_NETWORK_PASSPHRASE,
+      sorobanRpcUrl: "https://rpc-futurenet.stellar.org",
+    },
+  };
+}
+
 /**
  * Returns true if the Freighter extension is installed in the browser.
  * Safe to call on the server — returns false when window is undefined.
  */
 export async function isFreighterInstalled(): Promise<boolean> {
+  if (isE2EMockWalletEnabled()) return true;
   if (typeof window === "undefined") return false;
   try {
     const result = await isConnected();
@@ -68,6 +88,7 @@ export async function isFreighterInstalled(): Promise<boolean> {
  * Returns true if the user has previously authorised this app in Freighter.
  */
 export async function isAppAllowed(): Promise<boolean> {
+  if (isE2EMockWalletEnabled()) return false;
   if (typeof window === "undefined") return false;
   try {
     const result = await isAllowed();
@@ -84,6 +105,10 @@ export async function isAppAllowed(): Promise<boolean> {
  * - Throws WalletConnectionError with a typed code on failure.
  */
 export async function connectWallet(): Promise<WalletSession> {
+  if (isE2EMockWalletEnabled()) {
+    return getE2EMockSession();
+  }
+
   // 1. Check extension is installed
   const installed = await isFreighterInstalled();
   if (!installed) {
@@ -143,6 +168,7 @@ export async function connectWallet(): Promise<WalletSession> {
  * Never throws — safe to call on mount.
  */
 export async function restoreSession(): Promise<WalletSession | null> {
+  if (isE2EMockWalletEnabled()) return null;
   if (typeof window === "undefined") return null;
   try {
     const allowed = await isAppAllowed();
@@ -179,6 +205,10 @@ export function watchWalletChanges(
   onUpdate: (session: WalletSession | null) => void,
   pollMs = 3000,
 ): () => void {
+  if (isE2EMockWalletEnabled()) {
+    return () => {};
+  }
+
   const watcher = new WatchWalletChanges(pollMs);
 
   watcher.watch(({ address, network, networkPassphrase }) => {
