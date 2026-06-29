@@ -615,7 +615,10 @@ pub enum DataKey {
     GovernanceProposalCounter,
     GovernanceVotingPower(Address),
     TokenomicsConfig,
+    FeeRecipient,
+    ProtocolFeeBps,
     VrfOracleAddress,
+
     VrfRequestCounter,
     VrfRequests(u64),
     VrfResponses(u64),
@@ -2074,7 +2077,18 @@ impl SoroTaskContract {
                 env.invoke_contract::<Val>(&config.target, &config.function, config.args.clone());
             }
 
-            // ── Payment to keeper & balance deduction ────────────────────
+            // ── Fee split (protocol fee -> fee_recipient, remainder -> keeper) ─
+            let protocol_fee_bps: u32 = env
+                .storage()
+                .instance()
+                .get(&DataKey::ProtocolFeeBps)
+                .unwrap_or(0);
+
+            // Default to no protocol fee unless configured.
+            let protocol_fee: i128 = fee * (protocol_fee_bps as i128) / 10_000i128;
+            let keeper_fee: i128 = fee - protocol_fee;
+
+            // Deduct total fee from the task gas balance.
             config.gas_balance -= fee;
 
             if env.storage().instance().has(&DataKey::Token) {
@@ -2084,7 +2098,29 @@ impl SoroTaskContract {
                     .get(&DataKey::Token)
                     .expect("Not initialized");
                 let token_client = soroban_sdk::token::Client::new(env, &token_address);
-                token_client.transfer(&env.current_contract_address(), keeper, &fee);
+
+                // Transfer protocol fee (if any)
+                if protocol_fee > 0 {
+                    let fee_recipient: Address = env
+                        .storage()
+                        .instance()
+                        .get(&DataKey::FeeRecipient)
+                        .expect("Fee recipient not initialized");
+                    token_client.transfer(
+                        &env.current_contract_address(),
+                        &fee_recipient,
+                        &protocol_fee,
+                    );
+                }
+
+                // Transfer keeper fee (always >= 0)
+                if keeper_fee > 0 {
+                    token_client.transfer(
+                        &env.current_contract_address(),
+                        keeper,
+                        &keeper_fee,
+                    );
+                }
             }
 
             // ── State update ────────────────────────────────────────────
@@ -2120,6 +2156,13 @@ impl SoroTaskContract {
         }
         env.storage().instance().set(&DataKey::Token, &token);
 
+        // Fee recipient defaults: disabled until explicitly configured.
+        // NOTE: We intentionally do not require init to set fee recipient to keep backward compatibility.
+        // protocol_fee_bps defaults to 0.
+        if !env.storage().instance().has(&DataKey::ProtocolFeeBps) {
+            env.storage().instance().set(&DataKey::ProtocolFeeBps, &0u32);
+        }
+
         // Emit initialized event
         env.events().publish(
             (
@@ -2130,6 +2173,57 @@ impl SoroTaskContract {
         );
         exit_security_guard(&env);
     }
+
+    /// Sets the fee recipient address.
+    /// Only callable by the contract admin (same authority as tokenomics updates).
+    pub fn set_fee_recipient(env: Env, recipient: Address) {
+        enter_security_guard(&env);
+        let admin = env
+            .storage()
+            .instance()
+            .get::<DataKey, Address>(&DataKey::AdminAddress)
+            .expect("Admin not initialized");
+        admin.require_auth();
+
+        env.storage().instance().set(&DataKey::FeeRecipient, &recipient);
+
+        env.events().publish(
+            (
+                Symbol::new(&env, "FeeRecipientSet"),
+                Symbol::new(&env, "v1"),
+            ),
+            recipient,
+        );
+        exit_security_guard(&env);
+    }
+
+    /// Sets protocol fee share in basis points (bps).
+    /// Example: 500 bps = 5% of the computed fee.
+    pub fn set_protocol_fee_bps(env: Env, bps: u32) {
+        enter_security_guard(&env);
+        if bps > 10_000 {
+            panic_with_error!(&env, Error::InvalidPayload);
+        }
+
+        let admin = env
+            .storage()
+            .instance()
+            .get::<DataKey, Address>(&DataKey::AdminAddress)
+            .expect("Admin not initialized");
+        admin.require_auth();
+
+        env.storage().instance().set(&DataKey::ProtocolFeeBps, &bps);
+
+        env.events().publish(
+            (
+                Symbol::new(&env, "ProtocolFeeBpsSet"),
+                Symbol::new(&env, "v1"),
+            ),
+            bps,
+        );
+        exit_security_guard(&env);
+    }
+
 
     /// Initializes the contract for Soroban-native proxy upgrades.
     pub fn init_proxy(env: Env, admin: Address, token: Address, version: u32) {
@@ -5410,6 +5504,10 @@ pub(crate) mod tests {
         let token_client = soroban_sdk::token::Client::new(&env, &token_address);
         let token_admin_client = soroban_sdk::token::StellarAssetClient::new(&env, &token_address);
 
+        // Initialize proxy to set admin authority.
+        let admin = Address::generate(&env);
+        client.init_proxy(&admin, &token_address, &1);
+
         client.init(&token_address);
         client.init_tokenomics_config(&TokenomicsConfig {
             staking_reward_rate: 500,
@@ -5419,6 +5517,9 @@ pub(crate) mod tests {
             min_fee: 100,
             max_fee: 10000,
         });
+
+        // Configure fee split: 0 bps (no protocol fee), so keeper gets full fee.
+        client.set_protocol_fee_bps(&0);
 
         let target = env.register(MockTarget, ());
         let mut cfg = base_config(&env, target);
@@ -5454,6 +5555,59 @@ pub(crate) mod tests {
             "keeper should receive the fee"
         );
     }
+
+    #[test]
+    fn test_fee_recipient_receives_fee() {
+        let (env, id) = setup();
+        let client = SoroTaskContractClient::new(&env, &id);
+
+        let token_admin = Address::generate(&env);
+        let token_id = env.register_stellar_asset_contract_v2(token_admin.clone());
+        let token_address = token_id.address();
+        let token_client = soroban_sdk::token::Client::new(&env, &token_address);
+        let token_admin_client = soroban_sdk::token::StellarAssetClient::new(&env, &token_address);
+
+        let admin = Address::generate(&env);
+        client.init_proxy(&admin, &token_address, &1);
+
+        client.init(&token_address);
+        client.init_tokenomics_config(&TokenomicsConfig {
+            staking_reward_rate: 500,
+            governance_quorum_percentage: 1000,
+            governance_voting_period: 3_600_000,
+            fee_model: FeeModel::Fixed,
+            min_fee: 100,
+            max_fee: 10000,
+        });
+
+        // Split: protocol_fee_bps=500 => 5% of 100 = 5, keeper gets 95.
+        let fee_recipient = Address::generate(&env);
+        client.set_fee_recipient(&fee_recipient);
+        client.set_protocol_fee_bps(&500);
+
+        let target = env.register(MockTarget, ());
+        let mut cfg = base_config(&env, target);
+        cfg.gas_balance = 0;
+        let creator = cfg.creator.clone();
+        let task_id = client.register(&cfg);
+
+        let keeper = Address::generate(&env);
+        token_admin_client.mint(&creator, &5000);
+        token_admin_client.mint(&keeper, &0);
+        token_admin_client.mint(&fee_recipient, &0);
+
+        client.deposit_gas(&task_id, &creator, &1000);
+
+        set_timestamp(&env, 3600);
+        client.execute(&keeper, &task_id);
+
+        // gas_balance reduced by total fee 100
+        assert_eq!(client.get_task(&task_id).unwrap().gas_balance, 900);
+
+        assert_eq!(token_client.balance(&fee_recipient), 5);
+        assert_eq!(token_client.balance(&keeper), 95);
+    }
+
 
     /// Test that execution fails if gas_balance is insufficient for the fee.
     #[test]
