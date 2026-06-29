@@ -2,21 +2,12 @@
 
 import React, { useState, useEffect, useCallback } from "react";
 import { useZKProverEngine } from "@/src/hooks/useZKProverEngine";
-import { ZKProofStatusBadge } from "@/src/components/zk-proof/ZKProofStatusBadge";
-import { ZKProofLogStream } from "@/src/components/zk-proof/ZKProofLogStream";
-import { ZKProofDiagnosticsPanel } from "@/src/components/zk-proof/ZKProofDiagnosticsPanel";
-import type { ZkProofGenerationOptions } from "@/src/lib/zk-proof";
+import { ZKProofStatusBadge } from "./ZKProofStatusBadge";
+import { ZKProofLogStream } from "./ZKProofLogStream";
+import { ZKProofDiagnosticsPanel } from "./ZKProofDiagnosticsPanel";
+import type { ZkTask, ZkProofGenerationOptions } from "@/src/lib/zk-proof";
 
-export interface ZkTask {
-  id: number;
-  contractAddress: string;
-  functionName: string;
-  interval: number;
-  gasBalance: number;
-  status: "active" | "paused";
-}
-
-interface ZKProofVerificationProps {
+interface ZKProverPanelProps {
   tasks: ZkTask[];
   walletConnected: boolean;
   walletAddress: string | null;
@@ -30,13 +21,13 @@ interface ZKProofVerificationProps {
   }) => void;
 }
 
-export default function ZKProofVerification({
+export function ZKProverPanel({
   tasks,
   walletConnected,
   walletAddress,
   onZkVerified,
   onAddLog,
-}: ZKProofVerificationProps) {
+}: ZKProverPanelProps) {
   const {
     state,
     isGenerating,
@@ -172,6 +163,13 @@ export default function ZKProofVerification({
     state.errors,
   ]);
 
+  const handleReset = useCallback(() => {
+    reset();
+    setSelectedTaskId("");
+    setTaskCondition('{"minLiquidity": 10000}');
+    setSecretData('{"actualLiquidity": 25000, "salt": "0xfe3a"}');
+  }, [reset]);
+
   return (
     <div className="bg-neutral-900/60 backdrop-blur-md border border-neutral-800 rounded-3xl p-6 shadow-2xl relative overflow-hidden">
       <div className="absolute top-0 right-0 -mr-16 -mt-16 w-64 h-64 bg-violet-600/10 rounded-full blur-3xl pointer-events-none" />
@@ -180,7 +178,7 @@ export default function ZKProofVerification({
       <div className="flex flex-wrap items-center justify-between gap-4 mb-6 border-b border-neutral-800 pb-4 relative z-10">
         <div>
           <h2 className="text-xl font-bold bg-gradient-to-r from-violet-400 to-indigo-400 bg-clip-text text-transparent flex items-center gap-2">
-            <span>🛡️</span> Zero-Knowledge (ZK) Proof Verification
+            Zero-Knowledge (ZK) Proof Verification
           </h2>
           <p className="text-xs text-neutral-500 mt-1">
             Build privacy-preserving task evaluations using the browser prover engine.
@@ -256,7 +254,7 @@ export default function ZKProofVerification({
                 </select>
                 {tasks.length === 0 && (
                   <p className="text-xs text-amber-400/80 mt-1.5 flex items-center gap-1">
-                    ⚠️ No registered tasks available. Create a task first.
+                    No registered tasks available. Create a task first.
                   </p>
                 )}
               </div>
@@ -299,7 +297,7 @@ export default function ZKProofVerification({
 
               <div className="bg-neutral-950 p-4 rounded-2xl border border-neutral-800/80 space-y-3">
                 <div className="text-xs font-semibold text-neutral-400 mb-1">
-                  💡 QA Simulation Panel
+                  QA Simulation Panel
                 </div>
                 <div className="flex items-center justify-between">
                   <label
@@ -333,20 +331,31 @@ export default function ZKProofVerification({
                 </div>
               </div>
 
-              <button
-                type="submit"
-                disabled={isBusy || !selectedTaskId}
-                className="w-full bg-gradient-to-r from-violet-600 to-indigo-600 hover:from-violet-500 hover:to-indigo-500 text-white font-medium py-3 px-4 rounded-xl shadow-lg hover:shadow-violet-600/20 active:scale-[0.99] transition-all disabled:opacity-50 disabled:cursor-not-allowed text-sm"
-              >
-                {isGenerating ? (
-                  <span className="flex items-center justify-center gap-2">
-                    <span className="w-4 h-4 rounded-full border-2 border-white border-t-transparent animate-spin" />
-                    Generating Proof on Worker Pool...
-                  </span>
-                ) : (
-                  "Generate Zero-Knowledge Proof"
+              <div className="flex gap-2">
+                <button
+                  type="submit"
+                  disabled={isBusy || !selectedTaskId}
+                  className="flex-1 bg-gradient-to-r from-violet-600 to-indigo-600 hover:from-violet-500 hover:to-indigo-500 text-white font-medium py-3 px-4 rounded-xl shadow-lg hover:shadow-violet-600/20 active:scale-[0.99] transition-all disabled:opacity-50 disabled:cursor-not-allowed text-sm"
+                >
+                  {isGenerating ? (
+                    <span className="flex items-center justify-center gap-2">
+                      <span className="w-4 h-4 rounded-full border-2 border-white border-t-transparent animate-spin" />
+                      Generating Proof on Worker Pool...
+                    </span>
+                  ) : (
+                    "Generate Zero-Knowledge Proof"
+                  )}
+                </button>
+                {state.status !== "idle" && (
+                  <button
+                    type="button"
+                    onClick={handleReset}
+                    className="px-4 py-3 rounded-xl border border-neutral-800 text-neutral-400 hover:text-neutral-200 hover:border-neutral-700 transition text-sm"
+                  >
+                    Reset
+                  </button>
                 )}
-              </button>
+              </div>
             </form>
           </div>
 
@@ -370,7 +379,7 @@ export default function ZKProofVerification({
                         JSON.stringify(state.proof, null, 2),
                       )
                     }
-                    className="text-[10px] text-violet-400 hover:text-violet-300 underline"
+                    className="text-[10px] text-violet-400 hover:text-violet-300"
                   >
                     Copy Proof JSON
                   </button>
@@ -395,7 +404,7 @@ export default function ZKProofVerification({
                         Invoking verify_zk_condition...
                       </>
                     ) : state.status === "success" ? (
-                      "🛡️ Verified & Secured On-Chain"
+                        "Verified & Secured On-Chain"
                     ) : (
                       "Submit & Verify Proof On-Chain"
                     )}
