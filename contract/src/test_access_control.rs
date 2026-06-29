@@ -128,6 +128,74 @@ fn test_register_edge_case_zero_interval() {
     );
 }
 
+#[test]
+fn test_set_min_bounty_authorized_admin_succeeds() {
+    let (env, client) = setup_authed();
+    let admin = Address::generate(&env);
+    let token = Address::generate(&env);
+
+    client.init_proxy(&admin, &token, &1);
+    client.set_min_bounty(&admin, &500);
+
+    assert_eq!(client.get_min_bounty(), 500);
+}
+
+#[test]
+fn test_set_min_bounty_unauthorized_actor_rejected() {
+    let (env, client) = setup_authed();
+    let admin = Address::generate(&env);
+    let wrong_admin = Address::generate(&env);
+    let token = Address::generate(&env);
+
+    client.init_proxy(&admin, &token, &1);
+    let result = client.try_set_min_bounty(&wrong_admin, &500);
+
+    assert_eq!(
+        result,
+        Err(Ok(soroban_sdk::Error::from_contract_error(
+            Error::Unauthorized as u32
+        )))
+    );
+}
+
+#[test]
+fn test_register_rejects_bounty_below_minimum() {
+    let (env, client) = setup_authed();
+    let admin = Address::generate(&env);
+    let target = env.register_contract(None, MockTarget);
+
+    client.init_proxy(&admin, &Address::generate(&env), &1);
+    client.set_min_bounty(&admin, &1_000);
+
+    let mut cfg = base_config(&env, target);
+    cfg.gas_balance = 999;
+
+    let result = client.try_register(&cfg);
+    assert_eq!(
+        result,
+        Err(Ok(soroban_sdk::Error::from_contract_error(
+            Error::BountyBelowMinimum as u32
+        )))
+    );
+    assert_eq!(client.get_counter(), 0);
+}
+
+#[test]
+fn test_register_accepts_bounty_at_minimum() {
+    let (env, client) = setup_authed();
+    let admin = Address::generate(&env);
+    let target = env.register_contract(None, MockTarget);
+
+    client.init_proxy(&admin, &Address::generate(&env), &1);
+    client.set_min_bounty(&admin, &1_000);
+
+    let mut cfg = base_config(&env, target);
+    cfg.gas_balance = 1_000;
+
+    let task_id = client.register(&cfg);
+    assert_eq!(client.get_task(&task_id).unwrap().gas_balance, 1_000);
+}
+
 // =============================================================================
 // 2. pause_task
 // =============================================================================
