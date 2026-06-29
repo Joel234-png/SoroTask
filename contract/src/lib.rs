@@ -2402,6 +2402,63 @@ impl SoroTaskContract {
         exit_security_guard(&env);
     }
 
+    /// Modifies an existing task configuration.
+    ///
+    /// Only the task owner (creator) may call this function. Locked fields:
+    /// `creator`, `gas_balance`, and `last_run` cannot be changed here — use
+    /// deposit/withdraw for gas and let execution update `last_run`.
+    pub fn modify_task(env: Env, task_id: u64, new_config: TaskConfig) {
+        enter_security_guard(&env);
+
+        let task_key = DataKey::Task(task_id);
+        let existing: TaskConfig = env
+            .storage()
+            .persistent()
+            .get(&task_key)
+            .expect("Task not found");
+
+        existing.creator.require_auth();
+
+        if new_config.interval == 0 {
+            panic_with_error!(&env, Error::InvalidInterval);
+        }
+
+        if let Err(e) = Self::validate_args(&new_config.args) {
+            panic_with_error!(&env, e);
+        }
+
+        let updated = TaskConfig {
+            creator: existing.creator,
+            gas_balance: existing.gas_balance,
+            last_run: existing.last_run,
+            ..new_config
+        };
+
+        let fee = Self::calculate_execution_fee(&env, &updated);
+        if updated.gas_balance < fee {
+            panic_with_error!(&env, Error::InsufficientBalance);
+        }
+
+        if existing.is_active && !updated.is_active {
+            remove_active_task_id(&env, task_id);
+        } else if !existing.is_active && updated.is_active {
+            add_active_task_id(&env, task_id);
+        }
+
+        env.storage().persistent().set(&task_key, &updated);
+
+        env.events().publish(
+            (
+                Symbol::new(&env, "TaskUpdated"),
+                Symbol::new(&env, "v1"),
+                task_id,
+            ),
+            updated.creator.clone(),
+        );
+
+        exit_security_guard(&env);
+    }
+
     /// Returns the global gas token address.
     pub fn get_token(env: Env) -> Address {
         env.storage()
@@ -4226,45 +4283,6 @@ pub(crate) mod tests {
             Err(Ok(soroban_sdk::Error::from_contract_error(
                 Error::InvalidUpgradeVersion as u32
             )))
-        );
-    }
-
-    #[allow(dead_code)]
-    pub(crate) fn update_task(env: Env, task_id: u64, new_config: TaskConfig) {
-        let task_key = DataKey::Task(task_id);
-
-        let existing: TaskConfig = env
-            .storage()
-            .persistent()
-            .get(&task_key)
-            .expect("Task not found");
-
-        // Only original creator can update
-        existing.creator.require_auth();
-
-        // Validate interval
-        if new_config.interval == 0 {
-            panic_with_error!(&env, Error::InvalidInterval);
-        }
-
-        // Preserve fields that must not change
-        let updated = TaskConfig {
-            yield_strategy: None,
-            creator: existing.creator, // lock — cannot transfer ownership
-            gas_balance: existing.gas_balance, // lock — use deposit/withdraw
-            last_run: existing.last_run, // lock — would break interval logic
-            ..new_config
-        };
-
-        env.storage().persistent().set(&task_key, &updated);
-
-        env.events().publish(
-            (
-                Symbol::new(&env, "TaskUpdated"),
-                Symbol::new(&env, "v1"),
-                task_id,
-            ),
-            updated.creator.clone(),
         );
     }
 
