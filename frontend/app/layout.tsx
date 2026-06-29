@@ -35,7 +35,7 @@ export default function RootLayout({
         className={`${geistSans.variable} ${geistMono.variable} antialiased`}
       >
         <CommandPalette />
-        {children}
+        <AppProviders>{children}</AppProviders>
         {/* Initialize Sentry and fetch instrumentation on client */}
         <ClientInit />
       </body>
