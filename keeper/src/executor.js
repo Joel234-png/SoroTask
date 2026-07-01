@@ -15,6 +15,94 @@ const POLL_INTERVAL_MS = 2000;
 
 const logger = createLogger("executor");
 
+// ── Execution Step codes (mirrors events::ExecutionStep) ────────────────────
+const EXECUTION_STEPS = {
+  ValidateAuth: 1,
+  LoadTask: 2,
+  CheckActive: 3,
+  CheckWhitelist: 4,
+  CheckInterval: 5,
+  CheckDependencies: 6,
+  EvaluateResolver: 7,
+  CheckVrfCondition: 8,
+  CheckZkCondition: 9,
+  CalculateFee: 10,
+  CheckBalance: 11,
+  ExecuteYield: 12,
+  CallTarget: 13,
+  PayKeeper: 14,
+  UpdateState: 15,
+};
+
+const EXECUTION_STEP_NAMES = Object.fromEntries(
+  Object.entries(EXECUTION_STEPS).map(([k, v]) => [v, k]),
+);
+
+const STEP_RESULTS = { Passed: 0, Failed: 1, Skipped: 2 };
+
+function stepName(code) {
+  return EXECUTION_STEP_NAMES[code] || `Step(${code})`;
+}
+
+function resultName(code) {
+  return (
+    Object.entries(STEP_RESULTS).find(([, v]) => v === code)?.[0] ||
+    `Result(${code})`
+  );
+}
+
+// ── Execution Trace ─────────────────────────────────────────────────────────
+
+/**
+ * Read the on-chain execution trace for a given task.
+ * @param {SorobanRpc.Server} server
+ * @param {string} contractId
+ * @param {number|bigint} taskId
+ * @returns {Promise<object|null>} The parsed execution trace or null
+ */
+async function getExecutionTrace(server, contractId, taskId) {
+  try {
+    const contract = new Contract(contractId);
+    const taskIdScVal = xdr.ScVal.scvU64(
+      xdr.Uint64.fromString(taskId.toString()),
+    );
+    const tx = new TransactionBuilder(null, {
+      fee: BASE_FEE,
+      networkPassphrase: Networks.FUTURENET,
+    })
+      .addOperation(contract.call("get_execution_trace", taskIdScVal))
+      .setTimeout(30)
+      .build();
+
+    const simResult = await server.simulateTransaction(tx);
+    if (SorobanRpc.Api.isSimulationSuccess(simResult)) {
+      const resultVal = simResult.result?.retval;
+      if (resultVal) {
+        return parseExecutionTraceVal(resultVal);
+      }
+    }
+    return null;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Parse the ScVal returned by get_execution_trace into a plain JS object.
+ * This handles the Option<ExecutionTrace> return type.
+ */
+function parseExecutionTraceVal(val) {
+  if (!val) return null;
+  try {
+    const str = JSON.stringify(val);
+    // If the result is a void/None value, return null
+    if (str === '""' || str === "null" || str === "undefined") return null;
+    return val;
+  } catch {
+    return null;
+  }
+}
+
 /**
  * Poll getTransaction() until SUCCESS or FAILED, or max attempts reached.
  * @param {SorobanRpc.Server} server
@@ -216,7 +304,23 @@ async function executeTaskOnce(
   // Record lateness for success outcome (requirement 3.2, 3.6)
   recordLateness('success');
 
-  return { taskId, txHash, status, feePaid, error: null };
+  // Capture execution trace from on-chain data for debugging
+  let executionTrace = null;
+  try {
+    executionTrace = await getExecutionTrace(server, contractId, taskId);
+    if (executionTrace) {
+      taskLogger.debug("Execution trace captured", {
+        taskId,
+        steps: executionTrace.steps?.length || 0,
+        finalOutcome: executionTrace.final_outcome,
+        correlationId,
+      });
+    }
+  } catch {
+    // Trace capture is best-effort; do not fail the execution
+  }
+
+  return { taskId, txHash, status, feePaid, error: null, executionTrace };
 }
 
 /**
@@ -246,6 +350,7 @@ async function executeTask(
     error: null,
     ledger: null,
     closeTime: null,
+    executionTrace: null,
   };
 
   try {
@@ -266,6 +371,7 @@ async function executeTask(
     result.feePaid = executionResult.feePaid;
     result.ledger = executionResult.ledger;
     result.closeTime = executionResult.closeTime;
+    result.executionTrace = executionResult.executionTrace || null;
 
     taskLogger.info("Transaction finalised", {
       taskId,
@@ -441,5 +547,11 @@ module.exports = {
   executeTask,
   executeTaskWithRetry,
   createExecutor,
+  getExecutionTrace,
+  EXECUTION_STEPS,
+  EXECUTION_STEP_NAMES,
+  STEP_RESULTS,
+  stepName,
+  resultName,
   ErrorClassification,
 };
