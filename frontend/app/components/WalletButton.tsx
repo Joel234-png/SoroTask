@@ -57,7 +57,7 @@ export function WalletButton() {
         type="button"
         onClick={openConnectModal}
         aria-label={`Wallet connected: ${session.address}. Open wallet modal.`}
-        data-testid="connect-wallet-button"
+        data-testid="wallet-connected-button"
         id="connect-wallet-btn"
         className="flex items-center gap-2 rounded-md border border-neutral-700 bg-neutral-800 px-4 py-2 font-medium text-neutral-100 transition-colors hover:bg-neutral-700"
       >
@@ -101,6 +101,8 @@ export function WalletButton() {
   return (
     <button
       type="button"
+      id="connect-wallet-btn"
+      data-testid="connect-wallet-button"
       onClick={openConnectModal}
       disabled={isLoading}
       aria-label="Connect your Stellar wallet"
