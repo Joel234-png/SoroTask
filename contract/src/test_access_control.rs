@@ -592,18 +592,12 @@ fn test_remove_dependency_edge_case_not_present() {
 }
 
 // =============================================================================
-// 10. update_task (defined as a standalone function in the tests module)
+// 10. modify_task
 // =============================================================================
-//
-// update_task is NOT a contract entrypoint — it is a helper defined inside
-// the #[cfg(test)] mod tests block in lib.rs.  We test its auth semantics
-// directly by calling the function with a controlled Env.
 
-/// The original creator can update a task; ownership cannot be transferred.
+/// The original creator can modify a task; ownership cannot be transferred.
 #[test]
-fn test_update_task_cannot_transfer_ownership() {
-    use crate::tests::update_task;
-
+fn test_modify_task_cannot_transfer_ownership() {
     let env = Env::default();
     env.mock_all_auths();
     let id = env.register_contract(None, SoroTaskContract);
@@ -619,7 +613,6 @@ fn test_update_task_cannot_transfer_ownership() {
     };
     let task_id = client.register(&cfg);
 
-    // Attempt to transfer ownership by supplying a different creator.
     let new_cfg = TaskConfig {
         creator: new_creator.clone(),
         target: target.clone(),
@@ -635,39 +628,50 @@ fn test_update_task_cannot_transfer_ownership() {
         yield_strategy: None,
     };
 
-    // update_task accesses storage, which requires running inside the contract
-    // context via env.as_contract().
-    env.as_contract(&id, || {
-        update_task(env.clone(), task_id, new_cfg);
-    });
+    client.modify_task(&task_id, &new_cfg);
 
     let stored = client.get_task(&task_id).unwrap();
-    // creator must remain the original — ownership cannot be transferred.
     assert_eq!(
         stored.creator, original_creator,
-        "update_task must not allow ownership transfer"
+        "modify_task must not allow ownership transfer"
     );
-    // The interval update should have been applied.
     assert_eq!(stored.interval, 7_200);
 }
 
-/// update_task with an unauthorized caller panics.
+/// A non-creator cannot modify a task — must be rejected.
 #[test]
 #[should_panic]
-fn test_update_task_unauthorized_actor_rejected() {
-    use crate::tests::update_task;
-
-    let env = Env::default(); // no mock_all_auths
+fn test_modify_task_unauthorized_actor_rejected() {
+    let env = Env::default();
     let id = env.register_contract(None, SoroTaskContract);
+    let client = SoroTaskContractClient::new(&env, &id);
     let target = env.register_contract(None, MockTarget);
-
-    // Call update_task without any auth inside the contract context.
-    // The task doesn't exist so it panics with "Task not found", which is
-    // still a rejection — the function cannot proceed without a valid task.
     let new_cfg = base_config(&env, target);
-    env.as_contract(&id, || {
-        update_task(env.clone(), 1_u64, new_cfg);
-    });
+    client.modify_task(&1_u64, &new_cfg);
+}
+
+/// Modifying a task with insufficient gas balance must return InsufficientBalance.
+#[test]
+fn test_modify_task_edge_case_insufficient_balance() {
+    let (env, client) = setup_authed();
+    let target = env.register_contract(None, MockTarget);
+    let cfg = TaskConfig {
+        gas_balance: 1,
+        ..base_config(&env, target.clone())
+    };
+    let task_id = client.register(&cfg);
+
+    let new_cfg = TaskConfig {
+        interval: 7_200,
+        ..base_config(&env, target)
+    };
+    let result = client.try_modify_task(&task_id, &new_cfg);
+    assert_eq!(
+        result,
+        Err(Ok(soroban_sdk::Error::from_contract_error(
+            Error::InsufficientBalance as u32
+        )))
+    );
 }
 
 // =============================================================================
