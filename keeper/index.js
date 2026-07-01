@@ -29,6 +29,7 @@ const { WebhookAuthProtocol, InMemoryReplayStore } = require("./src/webhookAuth"
 const { WebhookTriggerHandler } = require("./src/webhookTrigger");
 const { MultiRegionRPCClient } = require("./src/disasterRecovery");
 const { KeeperP2PNetwork } = require("./src/p2pNetwork");
+const { KeeperAlertManager } = require("./src/keeperAlerts");
 
 // Create root logger for the main module
 const logger = createLogger("keeper");
@@ -156,6 +157,9 @@ async function main() {
   }
   metricsServer.setFailoverStateProvider(() => failoverClient.getStateSnapshot());
   const server = failoverClient.getServerFacade();
+
+  const alertManager = new KeeperAlertManager();
+  alertManager.startRpcMonitor(() => server.getLatestLedger());
 
   // Perform startup validation to fail fast on configuration errors
   const validator = new StartupValidator(
@@ -294,6 +298,7 @@ async function main() {
         });
       }
     }
+    alertManager.recordSuccess();
     shutdownManager.completeTask(taskId);
     metricsServer.publishTaskEvent("queue-success", taskId);
   });
@@ -322,6 +327,7 @@ async function main() {
         shardLabel: shardConfig.shardLabel,
       },
     });
+    alertManager.recordFailure({ taskId, error: err.message });
     shutdownManager.failTask(taskId, err);
     poller.invalidateCache(taskId);
     metricsServer.publishTaskEvent("queue-failed", taskId, { error: err.message });
@@ -584,6 +590,10 @@ async function main() {
         logger.error("Periodic reconciliation error", { error: err.message });
       }
     }
+  });
+
+  shutdownManager.registerResource("alert-manager", async () => {
+    alertManager.stopRpcMonitor();
   });
 
   // Register SLA monitor cleanup

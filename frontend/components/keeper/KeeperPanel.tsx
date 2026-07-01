@@ -9,13 +9,13 @@
 
 import React, { useEffect, useState } from 'react';
 import { useShallow } from 'zustand/react/shallow';
-import { Keeper, KeeperError } from '@/types/keeper';
+import { Keeper, KeeperError, KeeperUpdateMessage } from '@/types/keeper';
 import { useKeeperStore } from '@/app/Zustand/keeperStore';
 import { KeeperTable } from './KeeperTable';
 import { KeeperStatsCard, KeeperQuickStats } from './KeeperStatsCard';
 import { KeeperDetailModal } from './KeeperDetailModal';
 import { KeeperFiltersPanel } from './KeeperFiltersPanel';
-import { keeperService, KeeperWebSocketManager } from '@/lib/keeper/service';
+import { KeeperWebSocketMultiplexer } from '@/lib/keeper/service';
 
 interface KeeperPanelProps {
   onError?: (error: KeeperError) => void;
@@ -26,13 +26,16 @@ interface KeeperPanelProps {
 /**
  * Main Keeper Control Panel
  */
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === 'object' && value !== null;
+}
+
 export const KeeperPanel: React.FC<KeeperPanelProps> = ({
   onError,
   autoRefreshInterval = 30000, // 30 seconds
   enableWebSocket = true,
 }) => {
   const [showDetailModal, setShowDetailModal] = useState(false);
-  const [wsManager, setWsManager] = useState<KeeperWebSocketManager | null>(null);
 
   // Get state from store
   const {
@@ -84,9 +87,9 @@ export const KeeperPanel: React.FC<KeeperPanelProps> = ({
   useEffect(() => {
     if (!enableWebSocket) return;
 
-    const manager = new KeeperWebSocketManager();
+    const multiplexer = new KeeperWebSocketMultiplexer();
 
-    manager
+    multiplexer
       .connect()
       .then(() => {
         setWsConnected(true);
@@ -97,35 +100,54 @@ export const KeeperPanel: React.FC<KeeperPanelProps> = ({
         setWsConnected(false);
       });
 
-    // Subscribe to keeper updates
-    const unsubscribe = manager.onMessage((message: unknown) => {
+    const applyKeeperUpdate = (message: KeeperUpdateMessage) => {
       try {
-        const msg = message as Record<string, unknown>;
-        if (msg.type === 'keeper-status' && msg.keeperId && msg.data) {
-          // Update keeper in store
-          const keeper = keepers.find((k) => k.id === msg.keeperId as string);
-          if (keeper) {
-            updateKeeper({ ...keeper, ...msg.data });
-          }
+        const keeper = useKeeperStore
+          .getState()
+          .keepers.find((item) => item.id === message.keeperId);
+        if (!keeper || !isRecord(message.data)) {
+          return;
+        }
+
+        if (message.type === 'keeper-status' || message.type === 'keeper-metrics') {
+          updateKeeper({ ...keeper, ...message.data });
+          return;
+        }
+
+        if (message.type === 'keeper-execution') {
+          updateKeeper({
+            ...keeper,
+            recentExecutions: [
+              message.data as Keeper['recentExecutions'][number],
+              ...keeper.recentExecutions,
+            ].slice(0, 20),
+          });
         }
       } catch (error) {
         console.error('[Keeper Panel] Error processing WebSocket message:', error);
       }
-    });
+    };
 
-    setWsManager(manager);
+    const unsubscribeStatus = multiplexer.subscribe('keeper-status', applyKeeperUpdate);
+    const unsubscribeMetrics = multiplexer.subscribe('keeper-metrics', applyKeeperUpdate);
+    const unsubscribeExecution = multiplexer.subscribe('keeper-execution', applyKeeperUpdate);
+    const unsubscribeError = multiplexer.subscribe('keeper-error', applyKeeperUpdate);
 
     return () => {
-      unsubscribe();
-      manager.disconnect();
+      unsubscribeStatus();
+      unsubscribeMetrics();
+      unsubscribeExecution();
+      unsubscribeError();
+      multiplexer.disconnect();
+      setWsConnected(false);
     };
-  }, [enableWebSocket, keepers, updateKeeper, setWsConnected]);
+  }, [enableWebSocket, updateKeeper, setWsConnected]);
 
   // Fetch initial data
   useEffect(() => {
     fetchKeepers();
     fetchStatistics();
-  }, []);
+  }, [fetchKeepers, fetchStatistics]);
 
   // Auto-refresh
   useEffect(() => {
@@ -240,7 +262,7 @@ export const KeeperPanel: React.FC<KeeperPanelProps> = ({
           onSortChange={setSortConfig}
           onKeeperClick={handleKeeperClick}
           selectedIds={selection.selectedIds}
-          onSelectionChange={(ids) => {
+          onSelectionChange={() => {
             // Handle selection change
           }}
         />

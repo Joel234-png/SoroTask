@@ -14,17 +14,20 @@ import { useTaskStore } from "@/src/store/taskStore";
 import { useTaskGraph } from "@/src/hooks/useTaskGraph";
 import { nodeTypes } from "@/src/components/graph/TaskNode";
 import { GraphErrorBoundary } from "@/src/components/graph/GraphErrorBoundary";
+import { CanvasNodeGraphEditor } from "@/src/components/graph/CanvasNodeGraphEditor";
 
 interface TaskDependencyGraphProps {
   /** Filter graph to only the neighbourhood of this task id */
   focusTaskId?: string | null;
   onNodeClick?: (taskId: string) => void;
+  renderMode?: "reactflow" | "canvas";
   "data-testid"?: string;
 }
 
 function TaskDependencyGraphInner({
   focusTaskId = null,
   onNodeClick,
+  renderMode = "reactflow",
   "data-testid": testId,
 }: TaskDependencyGraphProps) {
   const tasks = useTaskStore((s) => s.tasks);
@@ -108,28 +111,48 @@ function TaskDependencyGraphInner({
         role="img"
         aria-label="Task dependency graph"
       >
-        <ReactFlow
-          nodes={nodes}
-          edges={edges}
-          nodeTypes={nodeTypes}
-          onNodesChange={onNodesChange}
-          onEdgesChange={onEdgesChange}
-          onNodeClick={handleNodeClick}
-          fitView
-          fitViewOptions={{ padding: 0.2 }}
-          minZoom={0.1}
-          maxZoom={4}
-          attributionPosition="bottom-right"
-        >
-          <Background color="#404040" gap={20} />
-          <Controls />
-          <MiniMap
-            nodeColor={(n) =>
-              n.selected ? "#2563eb" : "#262626"
-            }
-            maskColor="rgba(0,0,0,0.6)"
+        {renderMode === "canvas" ? (
+          <CanvasNodeGraphEditor
+            className="h-full border-0 p-0"
+            nodes={nodes.map((node) => ({
+              id: node.id,
+              x: node.position.x,
+              y: node.position.y,
+              width: 180,
+              height: 64,
+              label: node.data.label,
+              selected: node.selected,
+            }))}
+            edges={edges.map((edge) => ({
+              id: edge.id,
+              from: edge.source,
+              to: edge.target,
+            }))}
           />
-        </ReactFlow>
+        ) : (
+          <ReactFlow
+            nodes={nodes}
+            edges={edges}
+            nodeTypes={nodeTypes}
+            onNodesChange={onNodesChange}
+            onEdgesChange={onEdgesChange}
+            onNodeClick={handleNodeClick}
+            fitView
+            fitViewOptions={{ padding: 0.2 }}
+            minZoom={0.1}
+            maxZoom={4}
+            attributionPosition="bottom-right"
+          >
+            <Background color="#404040" gap={20} />
+            <Controls />
+            <MiniMap
+              nodeColor={(n) =>
+                n.selected ? "#2563eb" : "#262626"
+              }
+              maskColor="rgba(0,0,0,0.6)"
+            />
+          </ReactFlow>
+        )}
       </div>
 
       {/* Keyboard / interaction hint */}
