@@ -1,4 +1,5 @@
 import Link from "next/link";
+import { WalletNavSlot } from "@/app/components/WalletNavSlot";
 import {
   FiActivity,
   FiArrowRight,
@@ -11,6 +12,7 @@ import {
   FiPlayCircle,
   FiShield,
   FiZap,
+  FiTrendingUp,
 } from "react-icons/fi";
 
 const stats = [
@@ -73,6 +75,34 @@ const quickLinks = [
     icon: FiCpu,
     accent: "from-rose-400 to-red-300",
   },
+  {
+    href: "/tokenomics",
+    title: "Tokenomics Flow",
+    description: "Model distribution flows, cycles, and pools inside the network.",
+    icon: FiLayers,
+    accent: "from-emerald-300 to-teal-400",
+  },
+  {
+    href: "/yield-calculator",
+    title: "Yield Forecaster",
+    description: "Forecast simple vs compounded yields post keeper execution fees.",
+    icon: FiTrendingUp,
+    accent: "from-sky-300 to-indigo-400",
+  },
+  {
+    href: "/gas-optimization",
+    title: "Gas Optimization",
+    description: "Estimate transaction costs, schedule off-peak, and simulate runs.",
+    icon: FiZap,
+    accent: "from-amber-200 to-orange-400",
+  },
+  {
+    href: "/tracing",
+    title: "Distributed Tracing",
+    description: "Timeline waterfall diagnostics across services & block consensus.",
+    icon: FiActivity,
+    accent: "from-purple-400 to-rose-400",
+  },
 ];
 
 const trustSignals = [
@@ -126,13 +156,16 @@ export default function HomePage() {
               Settings
             </Link>
           </div>
-          <Link
-            href="/tasks"
-            className="inline-flex items-center gap-2 rounded-full bg-emerald-300 px-4 py-2 text-sm font-semibold text-slate-950 shadow-lg shadow-emerald-950/30 transition hover:bg-emerald-200"
-          >
-            Launch
-            <FiArrowRight aria-hidden="true" />
-          </Link>
+          <div className="flex items-center gap-3">
+            <WalletNavSlot />
+            <Link
+              href="/tasks"
+              className="inline-flex items-center gap-2 rounded-full bg-emerald-300 px-4 py-2 text-sm font-semibold text-slate-950 shadow-lg shadow-emerald-950/30 transition hover:bg-emerald-200"
+            >
+              Launch
+              <FiArrowRight aria-hidden="true" />
+            </Link>
+          </div>
         </nav>
 
         <div className="mx-auto grid w-full max-w-7xl gap-10 pb-16 pt-14 lg:grid-cols-[1.02fr_0.98fr] lg:items-center lg:pb-20 lg:pt-20">

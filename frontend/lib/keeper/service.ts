@@ -15,6 +15,7 @@ import {
   KeeperAPIRequest,
   KeeperError,
   Execution,
+  KeeperUpdateMessage,
 } from '@/types/keeper';
 import {
   createKeeperError,
@@ -45,6 +46,22 @@ const CACHE_TTL = 5 * 60 * 1000; // 5 minutes
  * Base URL for API (can be configured per environment)
  */
 const API_BASE_URL = process.env.NEXT_PUBLIC_API_URL || '/api';
+
+export type KeeperEventChannel = KeeperUpdateMessage['type'] | 'all';
+export type KeeperEventHandler = (message: KeeperUpdateMessage) => void;
+
+export interface KeeperWebSocketMultiplexerOptions {
+  url?: string;
+  WebSocketImpl?: typeof WebSocket;
+  maxReconnectAttempts?: number;
+  reconnectDelayMs?: number;
+  maxReconnectDelayMs?: number;
+}
+
+type KeeperSubscriptionMessage = {
+  type: 'subscribe' | 'unsubscribe';
+  channels: KeeperUpdateMessage['type'][];
+};
 
 /**
  * Make a resilient fetch request with retry logic and timeout
@@ -382,6 +399,237 @@ export const keeperService = {
     };
   },
 };
+
+function isKeeperEventChannel(value: unknown): value is KeeperUpdateMessage['type'] {
+  return (
+    value === 'keeper-status' ||
+    value === 'keeper-metrics' ||
+    value === 'keeper-execution' ||
+    value === 'keeper-error'
+  );
+}
+
+function isKeeperUpdateMessage(value: unknown): value is KeeperUpdateMessage {
+  if (typeof value !== 'object' || value === null) {
+    return false;
+  }
+
+  const message = value as Partial<KeeperUpdateMessage>;
+  return (
+    isKeeperEventChannel(message.type) &&
+    typeof message.keeperId === 'string' &&
+    typeof message.timestamp === 'string' &&
+    'data' in message
+  );
+}
+
+/**
+ * Multiplexes keeper update channels over one resilient WebSocket connection.
+ */
+export class KeeperWebSocketMultiplexer {
+  private ws: WebSocket | null = null;
+  private connectPromise: Promise<void> | null = null;
+  private readonly url: string;
+  private readonly WebSocketImpl: typeof WebSocket;
+  private readonly maxReconnectAttempts: number;
+  private readonly reconnectDelayMs: number;
+  private readonly maxReconnectDelayMs: number;
+  private readonly handlers = new Map<KeeperEventChannel, Set<KeeperEventHandler>>();
+  private reconnectAttempts = 0;
+  private manualClose = false;
+
+  constructor(options: KeeperWebSocketMultiplexerOptions = {}) {
+    this.url =
+      options.url || `${API_BASE_URL.replace(/^http/, 'ws')}/ws/keeper/updates`;
+    this.WebSocketImpl = options.WebSocketImpl || WebSocket;
+    this.maxReconnectAttempts = options.maxReconnectAttempts ?? 5;
+    this.reconnectDelayMs = options.reconnectDelayMs ?? 1000;
+    this.maxReconnectDelayMs = options.maxReconnectDelayMs ?? 30000;
+  }
+
+  connect(): Promise<void> {
+    if (this.isConnected()) {
+      return Promise.resolve();
+    }
+
+    if (this.connectPromise) {
+      return this.connectPromise;
+    }
+
+    this.manualClose = false;
+    this.connectPromise = new Promise((resolve, reject) => {
+      try {
+        const ws = new this.WebSocketImpl(this.url);
+        this.ws = ws;
+
+        ws.onopen = () => {
+          this.reconnectAttempts = 0;
+          this.connectPromise = null;
+          this.sendSubscribedChannels();
+          resolve();
+        };
+
+        ws.onmessage = (event) => {
+          this.handleRawMessage(event.data);
+        };
+
+        ws.onerror = (error) => {
+          if (this.connectPromise) {
+            this.connectPromise = null;
+            reject(error);
+          }
+          console.error('[Keeper WS] Multiplexer error:', error);
+        };
+
+        ws.onclose = () => {
+          this.connectPromise = null;
+          this.ws = null;
+          if (!this.manualClose) {
+            this.scheduleReconnect();
+          }
+        };
+      } catch (error) {
+        this.connectPromise = null;
+        reject(error);
+      }
+    });
+
+    return this.connectPromise;
+  }
+
+  subscribe(channel: KeeperEventChannel, handler: KeeperEventHandler): () => void {
+    const handlers = this.handlers.get(channel) ?? new Set<KeeperEventHandler>();
+    const hadSubscribers = handlers.size > 0;
+    handlers.add(handler);
+    this.handlers.set(channel, handlers);
+
+    if (!hadSubscribers && channel !== 'all' && this.isConnected()) {
+      this.sendSubscription('subscribe', [channel]);
+    }
+
+    return () => {
+      this.unsubscribe(channel, handler);
+    };
+  }
+
+  unsubscribe(channel: KeeperEventChannel, handler: KeeperEventHandler): void {
+    const handlers = this.handlers.get(channel);
+    if (!handlers) {
+      return;
+    }
+
+    handlers.delete(handler);
+    if (handlers.size > 0) {
+      return;
+    }
+
+    this.handlers.delete(channel);
+    if (channel !== 'all' && this.isConnected()) {
+      this.sendSubscription('unsubscribe', [channel]);
+    }
+  }
+
+  disconnect(): void {
+    this.manualClose = true;
+    this.connectPromise = null;
+    if (this.ws) {
+      this.ws.close();
+      this.ws = null;
+    }
+  }
+
+  isConnected(): boolean {
+    return this.ws?.readyState === this.WebSocketImpl.OPEN;
+  }
+
+  getSubscriptionCount(channel?: KeeperEventChannel): number {
+    if (channel) {
+      return this.handlers.get(channel)?.size ?? 0;
+    }
+
+    return Array.from(this.handlers.values()).reduce(
+      (count, handlers) => count + handlers.size,
+      0,
+    );
+  }
+
+  private handleRawMessage(raw: string): void {
+    let parsed: unknown;
+    try {
+      parsed = JSON.parse(raw);
+    } catch (error) {
+      console.warn('[Keeper WS] Ignoring malformed message:', error);
+      return;
+    }
+
+    if (!isKeeperUpdateMessage(parsed)) {
+      console.warn('[Keeper WS] Ignoring invalid keeper update:', parsed);
+      return;
+    }
+
+    this.dispatch(parsed);
+  }
+
+  private dispatch(message: KeeperUpdateMessage): void {
+    const channelHandlers = this.handlers.get(message.type) ?? new Set();
+    const allHandlers = this.handlers.get('all') ?? new Set();
+
+    for (const handler of [...channelHandlers, ...allHandlers]) {
+      try {
+        handler(message);
+      } catch (error) {
+        console.error('[Keeper WS] Keeper update handler failed:', error);
+      }
+    }
+  }
+
+  private sendSubscribedChannels(): void {
+    const channels = this.getServerChannels();
+    if (channels.length > 0) {
+      this.sendSubscription('subscribe', channels);
+    }
+  }
+
+  private getServerChannels(): KeeperUpdateMessage['type'][] {
+    return Array.from(this.handlers.keys()).filter(
+      (channel): channel is KeeperUpdateMessage['type'] => channel !== 'all',
+    );
+  }
+
+  private sendSubscription(
+    type: KeeperSubscriptionMessage['type'],
+    channels: KeeperUpdateMessage['type'][],
+  ): void {
+    if (!this.isConnected() || channels.length === 0) {
+      return;
+    }
+
+    const message: KeeperSubscriptionMessage = { type, channels };
+    this.ws?.send(JSON.stringify(message));
+  }
+
+  private scheduleReconnect(): void {
+    if (this.reconnectAttempts >= this.maxReconnectAttempts) {
+      console.error('[Keeper WS] Multiplexer reconnect attempts exhausted');
+      return;
+    }
+
+    const baseDelay = Math.min(
+      this.maxReconnectDelayMs,
+      this.reconnectDelayMs * 2 ** this.reconnectAttempts,
+    );
+    const jitter = Math.floor(Math.random() * Math.min(500, baseDelay));
+    this.reconnectAttempts += 1;
+
+    setTimeout(() => {
+      if (!this.manualClose && this.getServerChannels().length > 0) {
+        this.connect().catch((error) => {
+          console.error('[Keeper WS] Multiplexer reconnect failed:', error);
+        });
+      }
+    }, baseDelay + jitter);
+  }
+}
 
 /**
  * WebSocket connection handler for real-time updates

@@ -7,6 +7,7 @@ import {
   useState,
   useCallback,
 } from "react";
+import { initHoudiniThemeEngine } from "@/src/lib/theme/houdiniThemeEngine";
 
 export type ThemeMode = "light" | "dark" | "system";
 
@@ -40,6 +41,21 @@ export function ThemeProvider({ children }: { children: React.ReactNode }) {
     setModeState(saved);
     applyTheme(saved);
   }, [applyTheme]);
+
+  useEffect(() => {
+    void initHoudiniThemeEngine({
+      fallbackTokens: {
+        background: "#0a0a0a",
+        foreground: "#ededed",
+        accent: "#3b82f6",
+        surface: "#18181b",
+      },
+      externalThemeUrl: process.env.NEXT_PUBLIC_THEME_ENDPOINT,
+      onError: (error) => {
+        console.warn("Theme engine fallback activated", error.message);
+      },
+    });
+  }, []);
 
   // Listen for OS preference changes when mode is "system"
   useEffect(() => {

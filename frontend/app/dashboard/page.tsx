@@ -1,5 +1,10 @@
 "use client";
 
+import WidgetGrid from "@/components/WidgetGrid";
+import { TaskExecutionHeatmapEngine } from "@/src/components/TaskExecutionHeatmapEngine";
+import { RPCNodeHealthDashboard } from "@/src/components/rpc/RPCNodeHealthDashboard";
+import { useRPCHealthStore } from "@/src/store/rpcHealthStore";
+
 import { useEffect, useMemo, useState } from "react";
 
 type WidgetStatus = "loading" | "empty" | "error" | "success";
@@ -13,13 +18,6 @@ type WidgetDefinition = {
   getStatus: () => WidgetStatus;
   render: () => JSX.Element;
 };
-
-type DashboardConfig = {
-  widgetOrder: string[];
-  hiddenWidgetIds: string[];
-};
-
-const STORAGE_KEY = "sorotask.dashboard.config.v1";
 
 const widgetRegistry: Record<string, WidgetDefinition> = {
   volume: {
@@ -54,7 +52,9 @@ const widgetRegistry: Record<string, WidgetDefinition> = {
     description: "Tasks requiring intervention.",
     defaultSize: "small",
     getStatus: () => "empty",
-    render: () => <p className="text-sm text-slate-300">No failed tasks detected.</p>,
+    render: () => (
+      <p className="text-sm text-slate-300">No failed tasks detected.</p>
+    ),
   },
   bridgeLatency: {
     id: "bridgeLatency",
@@ -62,7 +62,9 @@ const widgetRegistry: Record<string, WidgetDefinition> = {
     description: "Cross-network median latency.",
     defaultSize: "small",
     getStatus: () => "loading",
-    render: () => <p className="text-sm text-slate-300">Measuring live latency...</p>,
+    render: () => (
+      <p className="text-sm text-slate-300">Measuring live latency...</p>
+    ),
   },
   alertFeed: {
     id: "alertFeed",
@@ -76,170 +78,96 @@ const widgetRegistry: Record<string, WidgetDefinition> = {
       </p>
     ),
   },
+  executionHeatmap: {
+    id: "executionHeatmap",
+    title: "Execution Success Rate",
+    description:
+      "Heatmap of task execution success rates across all active tasks.",
+    defaultSize: "large",
+    getStatus: () => "success" as const,
+    render: () => (
+      <TaskExecutionHeatmapEngine
+        fetchData={() =>
+          Promise.resolve({
+            periodLabel: "Last 7 days",
+            fetchedAt: new Date().toISOString(),
+            cells: [
+              {
+                id: "harvest",
+                label: "Harvest",
+                successRate: 98,
+                totalExecutions: 200,
+                status: "success" as const,
+              },
+              {
+                id: "rebalance",
+                label: "Rebalance",
+                successRate: 72,
+                totalExecutions: 50,
+                status: "warning" as const,
+              },
+              {
+                id: "rotate",
+                label: "Rotate",
+                successRate: 40,
+                totalExecutions: 30,
+                status: "failure" as const,
+              },
+              {
+                id: "topup",
+                label: "Top-up",
+                successRate: 91,
+                totalExecutions: 120,
+                status: "success" as const,
+              },
+              {
+                id: "pause",
+                label: "Pause",
+                successRate: 0,
+                totalExecutions: 0,
+                status: "empty" as const,
+              },
+            ],
+          })
+        }
+        maxRetries={3}
+        retryDelayMs={500}
+      />
+    ),
+  },
+  rpcHealth: {
+    id: "rpcHealth",
+    title: "RPC Node Health",
+    description: "Monitor RPC endpoint health with off-main-thread processing.",
+    defaultSize: "large",
+    getStatus: () => {
+      try {
+        const status = useRPCHealthStore.getState().overallStatus;
+        if (status === "healthy") return "success";
+        if (status === "degraded") return "loading";
+        return "error";
+      } catch {
+        return "loading";
+      }
+    },
+    render: () => <RPCNodeHealthDashboard />,
+  },
 };
 
-const defaultOrder = Object.keys(widgetRegistry);
-
-function ensureValidOrder(order: string[]): string[] {
-  const known = new Set(defaultOrder);
-  const deduped = order.filter((widgetId, index) => known.has(widgetId) && order.indexOf(widgetId) === index);
-  const missing = defaultOrder.filter((widgetId) => !deduped.includes(widgetId));
-  return [...deduped, ...missing];
-}
-
-function reorderWidgets(order: string[], fromId: string, toId: string): string[] {
-  if (fromId === toId) {
-    return order;
-  }
-
-  const fromIndex = order.indexOf(fromId);
-  const toIndex = order.indexOf(toId);
-  if (fromIndex < 0 || toIndex < 0) {
-    return order;
-  }
-
-  const next = [...order];
-  const [moved] = next.splice(fromIndex, 1);
-  next.splice(toIndex, 0, moved);
-  return next;
-}
-
-function getWidgetStateStyles(status: WidgetStatus): string {
-  switch (status) {
-    case "loading":
-      return "border-amber-400/40 bg-amber-500/10";
-    case "empty":
-      return "border-slate-500/40 bg-slate-500/10";
-    case "error":
-      return "border-rose-400/40 bg-rose-500/10";
-    default:
-      return "border-emerald-400/30 bg-emerald-500/10";
-  }
-}
-
-function getSizeClass(size: WidgetSize): string {
-  switch (size) {
-    case "large":
-      return "md:col-span-2";
-    case "medium":
-      return "md:col-span-1";
-    default:
-      return "md:col-span-1";
-  }
-}
-
 export default function DashboardPage() {
-  const [order, setOrder] = useState<string[]>(defaultOrder);
-  const [hiddenIds, setHiddenIds] = useState<string[]>([]);
-  const [draggingId, setDraggingId] = useState<string | null>(null);
-  const [ready, setReady] = useState(false);
-
-  useEffect(() => {
-    try {
-      const raw = window.localStorage.getItem(STORAGE_KEY);
-      if (!raw) {
-        setReady(true);
-        return;
-      }
-
-      const parsed = JSON.parse(raw) as DashboardConfig;
-      setOrder(ensureValidOrder(parsed.widgetOrder ?? []));
-      setHiddenIds((parsed.hiddenWidgetIds ?? []).filter((id) => defaultOrder.includes(id)));
-    } catch {
-      setOrder(defaultOrder);
-      setHiddenIds([]);
-    } finally {
-      setReady(true);
-    }
-  }, []);
-
-  useEffect(() => {
-    if (!ready) {
-      return;
-    }
-    const config: DashboardConfig = {
-      widgetOrder: order,
-      hiddenWidgetIds: hiddenIds,
-    };
-    window.localStorage.setItem(STORAGE_KEY, JSON.stringify(config));
-  }, [hiddenIds, order, ready]);
-
-  const visibleWidgets = useMemo(
-    () => order.filter((widgetId) => !hiddenIds.includes(widgetId)),
-    [hiddenIds, order],
-  );
-
   return (
     <main className="mx-auto min-h-screen max-w-7xl px-4 py-8 sm:px-6 lg:px-8">
       <header data-onboarding="dashboard" className="mb-8 flex flex-col gap-2">
-        <h1 className="text-3xl font-semibold text-slate-100">Analytics Dashboard</h1>
+        <h1 className="text-3xl font-semibold text-slate-100">
+          Analytics Dashboard
+        </h1>
         <p className="text-sm text-slate-300">
-          Drag cards to reorder them, or toggle widgets to personalize your workspace.
+          Drag cards to reorder them, or toggle widgets to personalize your
+          workspace.
         </p>
       </header>
 
-      <section className="mb-8 rounded-2xl border border-slate-700 bg-slate-900/60 p-4">
-        <h2 className="mb-3 text-sm font-medium text-slate-200">Visible Widgets</h2>
-        <div className="flex flex-wrap gap-3">
-          {defaultOrder.map((widgetId) => {
-            const widget = widgetRegistry[widgetId];
-            const checked = !hiddenIds.includes(widgetId);
-            return (
-              <label key={widgetId} className="flex items-center gap-2 text-sm text-slate-300">
-                <input
-                  type="checkbox"
-                  checked={checked}
-                  onChange={(event) => {
-                    if (event.target.checked) {
-                      setHiddenIds((current) => current.filter((id) => id !== widgetId));
-                    } else {
-                      setHiddenIds((current) => [...current, widgetId]);
-                    }
-                  }}
-                />
-                {widget.title}
-              </label>
-            );
-          })}
-        </div>
-      </section>
-
-      <section className="grid grid-cols-1 gap-4 md:grid-cols-2">
-        {visibleWidgets.map((widgetId) => {
-          const widget = widgetRegistry[widgetId];
-          const status = widget.getStatus();
-          return (
-            <article
-              key={widget.id}
-              draggable
-              onDragStart={() => setDraggingId(widget.id)}
-              onDragOver={(event) => event.preventDefault()}
-              onDrop={() => {
-                if (draggingId) {
-                  setOrder((current) => reorderWidgets(current, draggingId, widget.id));
-                }
-                setDraggingId(null);
-              }}
-              onDragEnd={() => setDraggingId(null)}
-              className={`${getSizeClass(widget.defaultSize)} rounded-2xl border p-4 transition ${getWidgetStateStyles(status)} ${
-                draggingId === widget.id ? "opacity-60" : "opacity-100"
-              }`}
-              data-testid={`widget-${widget.id}`}
-            >
-              <div className="mb-3 flex items-start justify-between gap-3">
-                <div>
-                  <h3 className="text-lg font-medium text-slate-100">{widget.title}</h3>
-                  <p className="text-xs text-slate-300">{widget.description}</p>
-                </div>
-                <span className="rounded-full border border-slate-600 px-2 py-1 text-xs uppercase tracking-wide text-slate-200">
-                  {status}
-                </span>
-              </div>
-              {widget.render()}
-            </article>
-          );
-        })}
-      </section>
+      <WidgetGrid widgetRegistry={widgetRegistry} />
     </main>
   );
 }

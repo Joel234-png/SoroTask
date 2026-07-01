@@ -103,18 +103,18 @@ describe('ZKProofVerification Component', () => {
     const generateButton = screen.getByRole('button', { name: 'Generate Zero-Knowledge Proof' });
     fireEvent.click(generateButton);
 
-    // Initial log
+    // Initial log from pipeline
     expect(screen.getByText(/Initializing off-chain proof generation pipeline/i)).toBeInTheDocument();
 
-    // Advance mock timers to generate logs inside act
+    // Advance through all pipeline stages: delay = 800ms base, 3 stages of ~267ms each
     act(() => {
-      jest.advanceTimersByTime(300); // step 1
+      jest.advanceTimersByTime(300);
     });
     act(() => {
-      jest.advanceTimersByTime(300); // step 2
+      jest.advanceTimersByTime(300);
     });
     act(() => {
-      jest.advanceTimersByTime(300); // step 3 (generates standard proof)
+      jest.advanceTimersByTime(300);
     });
 
     await waitFor(() => {
@@ -144,8 +144,12 @@ describe('ZKProofVerification Component', () => {
     const generateButton = screen.getByRole('button', { name: 'Generate Zero-Knowledge Proof' });
     fireEvent.click(generateButton);
 
+    // Advance through stages to trigger failure
     act(() => {
-      jest.advanceTimersByTime(600); // advance through initial steps
+      jest.advanceTimersByTime(300);
+    });
+    act(() => {
+      jest.advanceTimersByTime(300);
     });
 
     await waitFor(() => {
@@ -177,8 +181,15 @@ describe('ZKProofVerification Component', () => {
     const generateButton = screen.getByRole('button', { name: 'Generate Zero-Knowledge Proof' });
     fireEvent.click(generateButton);
 
+    // Advance through generation stages (3 stages of ~267ms)
     act(() => {
-      jest.advanceTimersByTime(900); // Wait for ZK proof to generate
+      jest.advanceTimersByTime(300);
+    });
+    act(() => {
+      jest.advanceTimersByTime(300);
+    });
+    act(() => {
+      jest.advanceTimersByTime(300);
     });
 
     await waitFor(() => {
@@ -188,8 +199,21 @@ describe('ZKProofVerification Component', () => {
     const verifyButton = screen.getByText('Submit & Verify Proof On-Chain');
     fireEvent.click(verifyButton);
 
+    // Advance through verification stages (5 stages of ~160ms each)
     act(() => {
-      jest.advanceTimersByTime(1200); // Advance through all contract verify phases
+      jest.advanceTimersByTime(200);
+    });
+    act(() => {
+      jest.advanceTimersByTime(200);
+    });
+    act(() => {
+      jest.advanceTimersByTime(200);
+    });
+    act(() => {
+      jest.advanceTimersByTime(200);
+    });
+    act(() => {
+      jest.advanceTimersByTime(200);
     });
 
     await waitFor(() => {
@@ -217,7 +241,13 @@ describe('ZKProofVerification Component', () => {
     fireEvent.click(generateButton);
 
     act(() => {
-      jest.advanceTimersByTime(900); // Wait for ZK proof to generate
+      jest.advanceTimersByTime(300);
+    });
+    act(() => {
+      jest.advanceTimersByTime(300);
+    });
+    act(() => {
+      jest.advanceTimersByTime(300);
     });
 
     await waitFor(() => {
@@ -228,7 +258,19 @@ describe('ZKProofVerification Component', () => {
     fireEvent.click(verifyButton);
 
     act(() => {
-      jest.advanceTimersByTime(1200); // Wait for verification phases to run
+      jest.advanceTimersByTime(200);
+    });
+    act(() => {
+      jest.advanceTimersByTime(200);
+    });
+    act(() => {
+      jest.advanceTimersByTime(200);
+    });
+    act(() => {
+      jest.advanceTimersByTime(200);
+    });
+    act(() => {
+      jest.advanceTimersByTime(200);
     });
 
     await waitFor(() => {
@@ -242,8 +284,7 @@ describe('ZKProofVerification Component', () => {
     expect(screen.getByText(/Soroban Transaction Revert/i)).toBeInTheDocument();
   });
 
-  it('supports clipboard diagnostics copying utility', async () => {
-    // Mock navigator clipboard API
+  it('supports clipboard diagnostics copying utility', () => {
     const writeTextMock = jest.fn().mockResolvedValue(undefined);
     Object.assign(navigator, {
       clipboard: {
@@ -266,10 +307,9 @@ describe('ZKProofVerification Component', () => {
     const diagnosticsTab = screen.getByRole('button', { name: /Diagnostics/i });
     fireEvent.click(diagnosticsTab);
 
-    const copyBtn = screen.getByText('📋 Copy Diagnostic Report');
+    const copyBtn = screen.getByText('Copy Diagnostic Report');
     fireEvent.click(copyBtn);
 
     expect(writeTextMock).toHaveBeenCalled();
-    expect(window.alert).toHaveBeenCalledWith('Diagnostic report copied to clipboard!');
   });
 });

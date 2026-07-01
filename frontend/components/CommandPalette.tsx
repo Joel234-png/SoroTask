@@ -2,6 +2,7 @@
 
 import { useState, useEffect, useRef, useMemo } from "react";
 import { useRouter } from "next/navigation";
+import { useWallet } from "@/app/context/WalletContext";
 
 // Define the structure of a command
 type Command = {
@@ -47,6 +48,7 @@ export function CommandPalette() {
   const inputRef = useRef<HTMLInputElement>(null);
   const listRef = useRef<HTMLDivElement>(null);
   const router = useRouter();
+  const { openConnectModal } = useWallet();
 
   // Define commands
   const commands: Command[] = useMemo(() => [
@@ -81,7 +83,7 @@ export function CommandPalette() {
       title: "Connect Wallet",
       icon: Icons.Wallet,
       group: "Actions",
-      perform: () => alert("Connecting wallet..."),
+      perform: () => openConnectModal(),
     },
     {
       id: "action-create",
@@ -100,27 +102,106 @@ export function CommandPalette() {
       group: "Actions",
       perform: () => alert("Theme toggled!"),
     },
-  ], [router]);
+  ], [router, openConnectModal]);
 
-  // Filter commands based on search
-  const filteredCommands = useMemo(() => {
-    if (!search) return commands;
-    return commands.filter((cmd) =>
-      cmd.title.toLowerCase().includes(search.toLowerCase())
-    );
-  }, [search, commands]);
-
-  // Group commands for rendering
-  const groupedCommands = useMemo(() => {
-    const groups: Record<string, Command[]> = {};
-    filteredCommands.forEach((cmd) => {
-      if (!groups[cmd.group]) {
-        groups[cmd.group] = [];
+  // Fuzzy search implementation
+  function fuzzyMatch(pattern: string, text: string): { matched: boolean; score: number } {
+    const lowerPattern = pattern.toLowerCase();
+    const lowerText = text.toLowerCase();
+    
+    if (!pattern) return { matched: true, score: 1 };
+    
+    let patternIdx = 0;
+    let score = 0;
+    let consecutiveBonus = 0;
+    
+    for (let i = 0; i < lowerText.length && patternIdx < lowerPattern.length; i++) {
+      if (lowerText[i] === lowerPattern[patternIdx]) {
+        score += 1 + consecutiveBonus;
+        consecutiveBonus += 1;
+        patternIdx++;
+      } else {
+        consecutiveBonus = 0;
       }
+    }
+    
+    const matched = patternIdx === lowerPattern.length;
+    return { matched, score: matched ? score : 0 };
+  }
+
+  const recentCommandsKey = "sorotask.command-palette.recent";
+
+  const getRecentCommands = useCallback((): string[] => {
+    try {
+      const raw = localStorage.getItem(recentCommandsKey);
+      return raw ? JSON.parse(raw) : [];
+    } catch {
+      return [];
+    }
+  }, []);
+
+  const [recentIds, setRecentIds] = useState<string[]>([]);
+
+  useEffect(() => {
+    setRecentIds(getRecentCommands());
+  }, [getRecentCommands]);
+
+  const saveRecentCommand = useCallback((id: string) => {
+    try {
+      const recent = getRecentCommands().filter((r) => r !== id);
+      const updated = [id, ...recent].slice(0, 5);
+      localStorage.setItem(recentCommandsKey, JSON.stringify(updated));
+      setRecentIds(updated);
+    } catch {
+      // Ignore storage errors
+    }
+  }, [getRecentCommands]);
+
+  // Filter and rank commands with fuzzy search
+  const { filteredCommands, groupedCommands, recentGroup } = useMemo(() => {
+    if (!search) {
+      const recentCmds = recentIds
+        .map((id) => commands.find((c) => c.id === id))
+        .filter(Boolean) as Command[];
+      const groups: Record<string, Command[]> = {};
+      commands.forEach((cmd) => {
+        if (!groups[cmd.group]) groups[cmd.group] = [];
+        groups[cmd.group].push(cmd);
+      });
+      return { filteredCommands: commands, groupedCommands: groups, recentGroup: recentCmds };
+    }
+
+    const scored = commands
+      .map((cmd) => ({
+        cmd,
+        score: fuzzyMatch(search, cmd.title).score + fuzzyMatch(search, cmd.group).score * 0.5,
+      }))
+      .filter(({ cmd, score }) => {
+        const titleMatch = fuzzyMatch(search, cmd.title);
+        const groupMatch = fuzzyMatch(search, cmd.group);
+        return titleMatch.matched || groupMatch.matched;
+      })
+      .sort((a, b) => b.score - a.score)
+      .map(({ cmd }) => cmd);
+
+    const groups: Record<string, Command[]> = {};
+    scored.forEach((cmd) => {
+      if (!groups[cmd.group]) groups[cmd.group] = [];
       groups[cmd.group].push(cmd);
     });
-    return groups;
-  }, [filteredCommands]);
+
+    return { filteredCommands: scored, groupedCommands: groups, recentGroup: [] };
+  }, [search, commands, recentIds]);
+
+  // Handle command execution
+  const handleCommand = useCallback(
+    (cmd: Command) => {
+      saveRecentCommand(cmd.id);
+      cmd.perform();
+      setIsOpen(false);
+    },
+    [saveRecentCommand]
+  );
 
   // Keyboard listener for Cmd+K / Ctrl+K
   useEffect(() => {
@@ -154,8 +235,7 @@ export function CommandPalette() {
       } else if (e.key === "Enter") {
         e.preventDefault();
         if (filteredCommands[selectedIndex]) {
-          filteredCommands[selectedIndex].perform();
-          setIsOpen(false);
+          handleCommand(filteredCommands[selectedIndex]);
         }
       } else if (e.key === "Escape") {
         e.preventDefault();
@@ -165,7 +245,7 @@ export function CommandPalette() {
 
     document.addEventListener("keydown", handleKeyDown);
     return () => document.removeEventListener("keydown", handleKeyDown);
-  }, [isOpen, filteredCommands, selectedIndex]);
+  }, [isOpen, filteredCommands, selectedIndex, handleCommand]);
 
   // Focus input when opened
   useEffect(() => {
@@ -178,35 +258,37 @@ export function CommandPalette() {
 
   // Keep selected item in view
   useEffect(() => {
-    if (isOpen && listRef.current) {
-      const selectedEl = listRef.current.querySelector('[aria-selected="true"]');
-      if (selectedEl) {
-        selectedEl.scrollIntoView({ block: "nearest" });
-      }
-    }
+    if (!isOpen) return;
+    requestAnimationFrame(() => {
+      const selected = listRef.current?.querySelector('[aria-selected="true"]');
+      selected?.scrollIntoView({ block: "nearest" });
+    });
   }, [selectedIndex, isOpen]);
 
   if (!isOpen) return null;
 
-  let currentIndex = 0;
+  const hasError = false;
+  const isLoading = search.length > 0 && filteredCommands.length === 0;
 
   return (
     <div className="fixed inset-0 z-50 flex items-start justify-center pt-24 sm:pt-32">
       {/* Backdrop */}
-      <div 
+      <div
         className="fixed inset-0 bg-black/60 backdrop-blur-sm transition-opacity"
         onClick={() => setIsOpen(false)}
+        aria-hidden="true"
       />
 
       {/* Palette Container */}
-      <div 
+      <div
         className="relative w-full max-w-xl overflow-hidden rounded-2xl bg-neutral-900 border border-neutral-700/50 shadow-2xl ring-1 ring-white/10 flex flex-col"
         role="dialog"
         aria-modal="true"
+        aria-label="Command palette"
       >
         {/* Search Input */}
         <div className="flex items-center px-4 py-4 border-b border-neutral-800/80 gap-3">
-          <div className="text-neutral-400">
+          <div className="text-neutral-400" aria-hidden="true">
             {Icons.Search}
           </div>
           <input
@@ -219,6 +301,9 @@ export function CommandPalette() {
               setSearch(e.target.value);
               setSelectedIndex(0);
             }}
+            aria-autocomplete="list"
+            aria-controls="command-list"
+            aria-expanded={isOpen}
           />
           <div className="flex items-center gap-1 text-xs text-neutral-500 font-mono bg-neutral-800 px-2 py-1 rounded">
             <span>esc</span>
@@ -226,40 +311,86 @@ export function CommandPalette() {
         </div>
 
         {/* Results List */}
-        <div 
+        <div
           ref={listRef}
+          id="command-list"
           className="max-h-[60vh] overflow-y-auto p-2 scroll-smooth"
+          role="listbox"
         >
-          {filteredCommands.length === 0 ? (
-            <div className="py-14 text-center text-sm text-neutral-500">
+          {isLoading ? (
+            <div className="py-14 text-center text-sm text-neutral-500" role="status" aria-live="polite">
+              Searching...
+            </div>
+          ) : hasError ? (
+            <div className="py-14 text-center text-sm text-red-400" role="alert">
+              Failed to load commands. Please try again.
+            </div>
+          ) : recentGroup.length > 0 && !search ? (
+            <>
+              <div className="px-3 py-2 text-xs font-semibold text-neutral-500 uppercase tracking-wider">
+                Recent
+              </div>
+              <div className="flex flex-col gap-1 mb-4">
+                {recentGroup.map((cmd, idx) => {
+                  const globalIdx = idx;
+                  const isSelected = globalIdx === selectedIndex;
+                  return (
+                    <button
+                      key={cmd.id}
+                      id={`cmd-${cmd.id}`}
+                      aria-selected={isSelected}
+                      className={`flex items-center gap-3 px-3 py-3 rounded-lg text-sm font-medium transition-colors w-full text-left ${
+                        isSelected
+                          ? "bg-blue-600/10 text-blue-400"
+                          : "text-neutral-300 hover:bg-neutral-800/60"
+                      }`}
+                      onClick={() => handleCommand(cmd)}
+                      onMouseMove={() => setSelectedIndex(globalIdx)}
+                      role="option"
+                    >
+                      <div className={`flex items-center justify-center ${
+                        isSelected ? "text-blue-400" : "text-neutral-500"
+                      }`}>
+                        {cmd.icon}
+                      </div>
+                      <span className="flex-1">{cmd.title}</span>
+                      {isSelected && (
+                        <span className="text-xs text-blue-500/70 font-mono" aria-hidden="true">
+                          ↵
+                        </span>
+                      )}
+                    </button>
+                  );
+                })}
+              </div>
+            </>
+          ) : filteredCommands.length === 0 ? (
+            <div className="py-14 text-center text-sm text-neutral-500" role="status">
               No results found.
             </div>
           ) : (
             Object.entries(groupedCommands).map(([group, cmds]) => (
               <div key={group} className="mb-4 last:mb-0">
-                <div className="px-3 py-2 text-xs font-semibold text-neutral-500 uppercase tracking-wider">
+                <div className="px-3 py-2 text-xs font-semibold text-neutral-500 uppercase tracking-wider" aria-hidden="true">
                   {group}
                 </div>
                 <div className="flex flex-col gap-1">
-                  {cmds.map((cmd) => {
-                    const isSelected = currentIndex === selectedIndex;
-                    const itemIndex = currentIndex;
-                    currentIndex++;
-
+                  {cmds.map((cmd, i) => {
+                    const globalIdx = filteredCommands.indexOf(cmd);
+                    const isSelected = globalIdx === selectedIndex;
                     return (
                       <button
                         key={cmd.id}
+                        id={`cmd-${cmd.id}`}
                         aria-selected={isSelected}
                         className={`flex items-center gap-3 px-3 py-3 rounded-lg text-sm font-medium transition-colors w-full text-left ${
                           isSelected
                             ? "bg-blue-600/10 text-blue-400"
                             : "text-neutral-300 hover:bg-neutral-800/60"
                         }`}
-                        onClick={() => {
-                          cmd.perform();
-                          setIsOpen(false);
-                        }}
-                        onMouseMove={() => setSelectedIndex(itemIndex)}
+                        onClick={() => handleCommand(cmd)}
+                        onMouseMove={() => setSelectedIndex(globalIdx)}
+                        role="option"
                       >
                         <div className={`flex items-center justify-center ${
                           isSelected ? "text-blue-400" : "text-neutral-500"
@@ -268,7 +399,7 @@ export function CommandPalette() {
                         </div>
                         <span className="flex-1">{cmd.title}</span>
                         {isSelected && (
-                          <span className="text-xs text-blue-500/70 font-mono">
+                          <span className="text-xs text-blue-500/70 font-mono" aria-hidden="true">
                             ↵
                           </span>
                         )}
@@ -288,7 +419,7 @@ export function CommandPalette() {
               <span className="flex items-center justify-center w-5 h-5 rounded bg-neutral-800 font-mono">↵</span>
               <span>to select</span>
             </div>
-            <div className="flex items-center gap-1.5">
+            <div className="hidden sm:flex items-center gap-1.5">
               <span className="flex items-center justify-center w-5 h-5 rounded bg-neutral-800 font-mono">↑</span>
               <span className="flex items-center justify-center w-5 h-5 rounded bg-neutral-800 font-mono">↓</span>
               <span>to navigate</span>
