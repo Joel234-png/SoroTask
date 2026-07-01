@@ -1,3 +1,8 @@
+export function StatCardSkeleton() {
+  return (
+    <div className="animate-pulse rounded-2xl border border-slate-700 bg-slate-800/50 p-6">
+      <div className="mb-3 h-4 w-24 rounded bg-slate-700" />
+      <div className="h-8 w-32 rounded bg-slate-700" />
 const pulse = "animate-pulse rounded bg-neutral-700/70";
 
 export function CardSkeleton() {
@@ -16,6 +21,9 @@ export function CardSkeleton() {
 
 export function ChartSkeleton() {
   return (
+    <div className="animate-pulse rounded-2xl border border-slate-700 bg-slate-800/50 p-6">
+      <div className="mb-4 h-4 w-32 rounded bg-slate-700" />
+      <div className="h-40 rounded bg-slate-700/70" />
     <div
       className={`${pulse} h-48 w-full rounded-xl`}
       aria-hidden="true"
@@ -34,6 +42,11 @@ export function TableSkeleton({ rows = 4 }: { rows?: number }) {
   );
 }
 
+export function TableSkeleton({ rows = 5 }: { rows?: number }) {
+  return (
+    <div className="animate-pulse space-y-3 rounded-2xl border border-slate-700 bg-slate-800/50 p-6">
+      {Array.from({ length: rows }).map((_, index) => (
+        <div key={index} className="h-10 rounded bg-slate-700/70" />
 export function StatCardSkeleton({ cards = 3 }: { cards?: number }) {
   return (
     <div

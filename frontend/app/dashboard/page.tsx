@@ -1,4 +1,10 @@
-"use client";
+import { Suspense } from "react";
+import { DashboardClient } from "./DashboardClient";
+import { StatCardSkeleton, ChartSkeleton, TableSkeleton } from "@/components/skeletons";
+import { getDashboardServerData } from "@/src/lib/rsc/server-data";
+
+async function DashboardContent() {
+  const data = await getDashboardServerData();
 
 import WidgetGrid from "@/components/WidgetGrid";
 import { TaskExecutionHeatmapEngine } from "@/src/components/TaskExecutionHeatmapEngine";
@@ -156,7 +162,7 @@ const widgetRegistry: Record<string, WidgetDefinition> = {
 
 export default function DashboardPage() {
   return (
-    <main className="mx-auto min-h-screen max-w-7xl px-4 py-8 sm:px-6 lg:px-8">
+    <>
       <header data-onboarding="dashboard" className="mb-8 flex flex-col gap-2">
         <h1 className="text-3xl font-semibold text-slate-100">
           Analytics Dashboard
@@ -165,8 +171,30 @@ export default function DashboardPage() {
           Drag cards to reorder them, or toggle widgets to personalize your
           workspace.
         </p>
+        <p className="text-xs text-slate-500">
+          Last updated: {new Date(data.lastUpdated).toLocaleString()}
+        </p>
       </header>
 
+      <DashboardClient initialData={data} />
+    </>
+  );
+}
+
+export default function DashboardPage() {
+  return (
+    <main className="mx-auto min-h-screen max-w-7xl px-4 py-8 sm:px-6 lg:px-8">
+      <Suspense
+        fallback={
+          <div className="space-y-6">
+            <StatCardSkeleton />
+            <ChartSkeleton />
+            <TableSkeleton rows={6} />
+          </div>
+        }
+      >
+        <DashboardContent />
+      </Suspense>
       <WidgetGrid widgetRegistry={widgetRegistry} />
     </main>
   );
