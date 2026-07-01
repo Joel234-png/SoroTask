@@ -315,6 +315,10 @@ class Metrics {
     this.lastBacklogSize = null;
     this.retryPressure = 0;
     this.rpcConnected = false;
+    this.sloThresholds = {
+      pollFreshnessMs: parseInt(process.env.SLO_POLL_FRESHNESS_MS || '30000', 10),
+      executionTimelinessMs: parseInt(process.env.SLO_EXECUTION_TIMELINESS_MS || '60000', 10),
+    };
     this.adminState = { paused: false, reason: null, changedAt: null };
     this.shardState = {
       shardIndex: 0,
@@ -459,9 +463,6 @@ class Metrics {
       this.gauges.pollFreshnessSloRate = value;
     } else if (key === 'executionTimelinessSloRate') {
       this.gauges.executionTimelinessSloRate = value;
-    } else if (key in this.gauges) {
-        this.feeSamples.reduce((sum, sample) => sum + sample, 0) / this.feeSamples.length;
-      return;
     }
     if (key in this.gauges) {
       this.gauges[key] = value;
@@ -737,269 +738,6 @@ class MetricsServer {
     this.registry = registry;
   }
 
-   initPrometheusMetrics() {
-     // Counter: Total tasks checked
-     this.promTasksChecked = new promClient.Counter({
-       name: 'keeper_tasks_checked_total',
-       help: 'Total number of tasks checked for execution eligibility',
-       registers: [this.register],
-     });
-
-     // Counter: Total tasks due for execution
-     this.promTasksDue = new promClient.Counter({
-       name: 'keeper_tasks_due_total',
-       help: 'Total number of tasks that were due for execution',
-       registers: [this.register],
-     });
-
-     // Counter: Total tasks executed successfully
-     this.promTasksExecuted = new promClient.Counter({
-       name: 'keeper_tasks_executed_total',
-       help: 'Total number of tasks executed successfully',
-       registers: [this.register],
-     });
-
-      // Counter: Total tasks failed
-      this.promTasksFailed = new promClient.Counter({
-        name: 'keeper_tasks_failed_total',
-        help: 'Total number of tasks that failed during execution',
-        registers: [this.register],
-      });
-
-      // Counter: Total tasks skipped due to idempotency lock
-      this.promTasksSkippedIdempotency = new promClient.Counter({
-        name: 'keeper_tasks_skipped_idempotency_total',
-        help: 'Total number of tasks skipped due to idempotency lock',
-        registers: [this.register],
-      });
-
-      // Counter: Total retry executions (retried tasks that succeeded)
-      this.promRetriesExecuted = new promClient.Counter({
-        name: 'keeper_retries_executed_total',
-        help: 'Total number of retried tasks that succeeded',
-        registers: [this.register],
-      });
-
-      // Counter: Total retries that failed
-      this.promRetriesFailed = new promClient.Counter({
-        name: 'keeper_retries_failed_total',
-        help: 'Total number of retried tasks that failed',
-        registers: [this.register],
-      });
-
-      // Histogram: Task execution lateness (ledger count between scheduled due and actual execution)
-      this.promTaskLateness = new promClient.Histogram({
-        name: 'keeper_task_execution_lateness_ledgers',
-        help: 'Difference in ledger numbers between task scheduled due time and actual execution',
-        buckets: [1, 2, 5, 10, 20, 50, 100, 200, 500, 1000],
-        registers: [this.register],
-      });
-
-     // Gauge: Seconds since last successful poll cycle
-     this.promPollFreshnessSeconds = new promClient.Gauge({
-       name: 'keeper_poll_freshness_seconds',
-       help: 'Seconds since the last successful polling cycle completed',
-       registers: [this.register],
-     });
-
-     // Histogram: Interval between poll cycle completions
-     this.promPollInterval = new promClient.Histogram({
-       name: 'keeper_poll_interval_seconds',
-       help: 'Seconds between consecutive polling cycle completions',
-       buckets: [1, 5, 10, 30, 60, 120, 300, 600],
-       registers: [this.register],
-     });
-
-     // Gauge: Current age of oldest task in the registry (seconds since last_run)
-     this.promOldestTaskAgeSeconds = new promClient.Gauge({
-       name: 'keeper_oldest_task_age_seconds',
-       help: 'Age of the oldest registered task (seconds since last_run)',
-       registers: [this.register],
-     });
-
-     // Counter: Total requests throttled by rate limiter
-     this.promThrottledRequests = new promClient.Counter({
-       name: 'keeper_throttled_requests_total',
-       help: 'Total number of requests throttled by the rate limiter',
-       labelNames: ['limiter_name'],
-       registers: [this.register],
-     });
-
-     // Counter: Total tasks skipped due to quarantine
-     this.promTasksQuarantinedSkipped = new promClient.Counter({
-       name: 'keeper_tasks_quarantined_skipped_total',
-       help: 'Total number of tasks skipped because they are quarantined',
-       registers: [this.register],
-     });
-
-     // Gauge: Number of quarantined tasks
-     this.promQuarantinedCount = new promClient.Gauge({
-       name: 'keeper_quarantined_tasks_count',
-       help: 'Current number of tasks in quarantine',
-       registers: [this.register],
-     });
-
-     // Counter: Total tasks quarantined
-     this.promTotalQuarantined = new promClient.Counter({
-       name: 'keeper_tasks_quarantined_total',
-       help: 'Total number of tasks that have been quarantined',
-       registers: [this.register],
-     });
-
-     // Counter: Total tasks recovered from quarantine
-     this.promTotalRecovered = new promClient.Counter({
-       name: 'keeper_tasks_recovered_total',
-       help: 'Total number of tasks recovered from quarantine',
-       registers: [this.register],
-     });
-
-     // Gauge: Average fee paid in XLM
-     this.promAvgFee = new promClient.Gauge({
-       name: 'keeper_avg_fee_paid_xlm',
-       help: 'Average transaction fee paid in XLM (rolling average)',
-       registers: [this.register],
-     });
-
-     // Gauge: Last cycle duration
-     this.promCycleDuration = new promClient.Gauge({
-       name: 'keeper_last_cycle_duration_ms',
-       help: 'Duration of the last polling cycle in milliseconds',
-       registers: [this.register],
-     });
-
-     // Gauge: Low gas count
-     this.promLowGasCount = new promClient.Gauge({
-       name: 'keeper_low_gas_count',
-       help: 'Number of tasks with low gas balance',
-       registers: [this.register],
-     });
-
-     // Gauge: Keeper uptime
-     this.promUptime = new promClient.Gauge({
-       name: 'keeper_uptime_seconds',
-       help: 'Keeper service uptime in seconds since start',
-       registers: [this.register],
-     });
-
-     // Gauge: RPC connection status (1 = connected, 0 = disconnected)
-     this.promRpcConnected = new promClient.Gauge({
-       name: 'keeper_rpc_connected',
-       help: 'RPC connection status (1 = connected, 0 = disconnected)',
-       registers: [this.register],
-     });
-
-     // Gauge: Forecast - underfunded tasks
-     this.promUnderfundedTasks = new promClient.Gauge({
-       name: 'keeper_forecast_underfunded_tasks',
-       help: 'Number of tasks forecasted to be underfunded',
-       registers: [this.register],
-     });
-
-     // Gauge: Forecast - high confidence forecasts
-     this.promHighConfidenceForecasts = new promClient.Gauge({
-       name: 'keeper_forecast_high_confidence',
-       help: 'Number of tasks with high-confidence gas forecasts',
-       registers: [this.register],
-     });
-
-     // Gauge: Forecast - low confidence forecasts
-     this.promLowConfidenceForecasts = new promClient.Gauge({
-       name: 'keeper_forecast_low_confidence',
-       help: 'Number of tasks with low-confidence gas forecasts',
-       registers: [this.register],
-     });
-
-     // Gauge: Forecast - risk level (0=low, 1=medium, 2=high)
-     this.promForecastRiskLevel = new promClient.Gauge({
-       name: 'keeper_forecast_risk_level',
-       help: 'Current forecast risk level (0=low, 1=medium, 2=high)',
-       registers: [this.register],
-     });
-
-     // === SLO-SPECIFIC METRICS ===
-
-     // Histogram: Retry delay before retry attempt (seconds)
-     this.promRetryDelay = new promClient.Histogram({
-       name: 'keeper_retry_delay_seconds',
-       help: 'Seconds waited before a retry attempt is made',
-       buckets: [0.1, 0.5, 1, 2, 5, 10, 30, 60, 120],
-       registers: [this.register],
-     });
-
-     // Counter: Total retry attempts with outcome label
-     this.promRetryAttempts = new promClient.Counter({
-       name: 'keeper_retry_attempts_total',
-       help: 'Total number of retry attempts made during task execution',
-       labelNames: ['outcome'], // 'success', 'failure', 'duplicate'
-       registers: [this.register],
-     });
-
-     // Counter: Tasks that exceeded max retries
-     this.promRetriesExhausted = new promClient.Counter({
-       name: 'keeper_retries_exhausted_total',
-       help: 'Total number of tasks that exhausted all retry attempts',
-       registers: [this.register],
-     });
-
-     // Gauge: Current size of retry queue
-     this.promRetryQueueSize = new promClient.Gauge({
-       name: 'keeper_retry_queue_size',
-       help: 'Current number of tasks pending retry',
-       registers: [this.register],
-     });
-
-     // Histogram: Time spent in retry queue before next attempt
-     this.promRetryTimeInQueue = new promClient.Histogram({
-       name: 'keeper_retry_time_in_queue_seconds',
-       help: 'Seconds a task spent waiting in retry queue before next attempt',
-       buckets: [1, 5, 10, 30, 60, 300, 600, 1800],
-       registers: [this.register],
-     });
-
-     // Counter: Tasks meeting poll freshness SLO
-     this.promPollFreshnessSloSuccess = new promClient.Counter({
-       name: 'keeper_poll_freshness_slo_success_total',
-       help: 'Total polls that met the freshness SLO threshold',
-       registers: [this.register],
-     });
-
-     // Counter: Tasks missing poll freshness SLO
-     this.promPollFreshnessSloFailure = new promClient.Counter({
-       name: 'keeper_poll_freshness_slo_failure_total',
-       help: 'Total polls that missed the freshness SLO threshold',
-       registers: [this.register],
-     });
-
-     // Counter: Tasks meeting execution timeliness SLO
-     this.promExecutionTimelinessSloSuccess = new promClient.Counter({
-       name: 'keeper_execution_timeliness_slo_success_total',
-       help: 'Total tasks executed within the timeliness SLO threshold',
-       registers: [this.register],
-     });
-
-     // Counter: Tasks missing execution timeliness SLO
-     this.promExecutionTimelinessSloFailure = new promClient.Counter({
-       name: 'keeper_execution_timeliness_slo_failure_total',
-       help: 'Total tasks that missed the timeliness SLO threshold',
-       registers: [this.register],
-     });
-
-     // Gauge: SLO success rates (computed externally, exposed as gauges for alerting)
-     this.promPollFreshnessSloRate = new promClient.Gauge({
-       name: 'keeper_slo_poll_freshness_rate',
-       help: 'Rolling rate of poll freshness SLO success (0-1)',
-       registers: [this.register],
-     });
-
-     this.promExecutionTimelinessSloRate = new promClient.Gauge({
-       name: 'keeper_slo_execution_timeliness_rate',
-       help: 'Rolling rate of execution timeliness SLO success (0-1)',
-       registers: [this.register],
-     });
-
-     // Add default metrics (process CPU, memory, etc.)
-     promClient.collectDefaultMetrics({ register: this.register });
-   }
   setControlStateProvider(provider) {
     this.controlStateProvider = provider;
   }
@@ -1348,6 +1086,161 @@ class MetricsServer {
       1,
     );
 
+    // --- Consolidated metrics (formerly defined in a duplicate init method) ---
+    this.promTasksSkippedIdempotency = new promClient.Counter({
+      name: 'keeper_tasks_skipped_idempotency_total',
+      help: 'Total number of tasks skipped due to idempotency lock',
+      registers: [this.register],
+    });
+    this.promRetriesExecuted = new promClient.Counter({
+      name: 'keeper_retries_executed_total',
+      help: 'Total number of retried tasks that succeeded',
+      registers: [this.register],
+    });
+    this.promRetriesFailed = new promClient.Counter({
+      name: 'keeper_retries_failed_total',
+      help: 'Total number of retried tasks that failed',
+      registers: [this.register],
+    });
+    this.promTaskLateness = new promClient.Histogram({
+      name: 'keeper_task_execution_lateness_ledgers',
+      help: 'Difference in ledger numbers between task scheduled due time and actual execution',
+      buckets: [1, 2, 5, 10, 20, 50, 100, 200, 500, 1000],
+      registers: [this.register],
+    });
+    this.promPollInterval = new promClient.Histogram({
+      name: 'keeper_poll_interval_seconds',
+      help: 'Seconds between consecutive polling cycle completions',
+      buckets: [1, 5, 10, 30, 60, 120, 300, 600],
+      registers: [this.register],
+    });
+    this.promOldestTaskAgeSeconds = new promClient.Gauge({
+      name: 'keeper_oldest_task_age_seconds',
+      help: 'Age of the oldest registered task (seconds since last_run)',
+      registers: [this.register],
+    });
+    this.promTasksQuarantinedSkipped = new promClient.Counter({
+      name: 'keeper_tasks_quarantined_skipped_total',
+      help: 'Total number of tasks skipped because they are quarantined',
+      registers: [this.register],
+    });
+    this.promQuarantinedCount = new promClient.Gauge({
+      name: 'keeper_quarantined_tasks_count',
+      help: 'Current number of tasks in quarantine',
+      registers: [this.register],
+    });
+    this.promTotalQuarantined = new promClient.Counter({
+      name: 'keeper_tasks_quarantined_total',
+      help: 'Total number of tasks that have been quarantined',
+      registers: [this.register],
+    });
+    this.promTotalRecovered = new promClient.Counter({
+      name: 'keeper_tasks_recovered_total',
+      help: 'Total number of tasks recovered from quarantine',
+      registers: [this.register],
+    });
+    this.promUnderfundedTasks = new promClient.Gauge({
+      name: 'keeper_forecast_underfunded_tasks',
+      help: 'Number of tasks forecasted to be underfunded',
+      registers: [this.register],
+    });
+    this.promHighConfidenceForecasts = new promClient.Gauge({
+      name: 'keeper_forecast_high_confidence',
+      help: 'Number of tasks with high-confidence gas forecasts',
+      registers: [this.register],
+    });
+    this.promLowConfidenceForecasts = new promClient.Gauge({
+      name: 'keeper_forecast_low_confidence',
+      help: 'Number of tasks with low-confidence gas forecasts',
+      registers: [this.register],
+    });
+    this.promForecastRiskLevel = new promClient.Gauge({
+      name: 'keeper_forecast_risk_level',
+      help: 'Current forecast risk level (0=low, 1=medium, 2=high)',
+      registers: [this.register],
+    });
+    this.promRetryDelay = new promClient.Histogram({
+      name: 'keeper_retry_delay_seconds',
+      help: 'Seconds waited before a retry attempt is made',
+      buckets: [0.1, 0.5, 1, 2, 5, 10, 30, 60, 120],
+      registers: [this.register],
+    });
+    this.promRetryAttempts = new promClient.Counter({
+      name: 'keeper_retry_attempts_total',
+      help: 'Total number of retry attempts made during task execution',
+      labelNames: ['outcome'],
+      registers: [this.register],
+    });
+    this.promRetriesExhausted = new promClient.Counter({
+      name: 'keeper_retries_exhausted_total',
+      help: 'Total number of tasks that exhausted all retry attempts',
+      registers: [this.register],
+    });
+    this.promRetryQueueSize = new promClient.Gauge({
+      name: 'keeper_retry_queue_size',
+      help: 'Current number of tasks pending retry',
+      registers: [this.register],
+    });
+    this.promRetryTimeInQueue = new promClient.Histogram({
+      name: 'keeper_retry_time_in_queue_seconds',
+      help: 'Seconds a task spent waiting in retry queue before next attempt',
+      buckets: [1, 5, 10, 30, 60, 300, 600, 1800],
+      registers: [this.register],
+    });
+    this.promPollFreshnessSloSuccess = new promClient.Counter({
+      name: 'keeper_poll_freshness_slo_success_total',
+      help: 'Total polls that met the freshness SLO threshold',
+      registers: [this.register],
+    });
+    this.promPollFreshnessSloFailure = new promClient.Counter({
+      name: 'keeper_poll_freshness_slo_failure_total',
+      help: 'Total polls that missed the freshness SLO threshold',
+      registers: [this.register],
+    });
+    this.promExecutionTimelinessSloSuccess = new promClient.Counter({
+      name: 'keeper_execution_timeliness_slo_success_total',
+      help: 'Total tasks executed within the timeliness SLO threshold',
+      registers: [this.register],
+    });
+    this.promExecutionTimelinessSloFailure = new promClient.Counter({
+      name: 'keeper_execution_timeliness_slo_failure_total',
+      help: 'Total tasks that missed the timeliness SLO threshold',
+      registers: [this.register],
+    });
+    this.promPollFreshnessSloRate = new promClient.Gauge({
+      name: 'keeper_slo_poll_freshness_rate',
+      help: 'Rolling rate of poll freshness SLO success (0-1)',
+      registers: [this.register],
+    });
+    this.promExecutionTimelinessSloRate = new promClient.Gauge({
+      name: 'keeper_slo_execution_timeliness_rate',
+      help: 'Rolling rate of execution timeliness SLO success (0-1)',
+      registers: [this.register],
+    });
+    this.promFraudRiskScore = new promClient.Gauge({
+      name: 'keeper_fraud_risk_score',
+      help: 'Most recent fraud risk score observed (0-1)',
+      registers: [this.register],
+    });
+    this.promFraudPendingAlerts = new promClient.Gauge({
+      name: 'keeper_fraud_pending_alerts',
+      help: 'Number of fraud alerts currently pending delivery',
+      registers: [this.register],
+    });
+    this.promReconciliationDrift = new promClient.Gauge({
+      name: 'keeper_reconciliation_balance_drift',
+      help: 'Most recent reconciliation balance drift observed',
+      registers: [this.register],
+    });
+    this.promReconciliationPending = new promClient.Gauge({
+      name: 'keeper_reconciliation_pending_executions',
+      help: 'Number of executions pending reconciliation',
+      registers: [this.register],
+    });
+
+    // Alias: legacy field name shares the keeper_poll_freshness_seconds gauge
+    this.promPollFreshnessSeconds = this.promPollFreshness;
+
     promClient.collectDefaultMetrics({ register: this.register });
   }
 
@@ -1641,16 +1534,12 @@ class MetricsServer {
 
     this.server.listen(this.port, () => {
       this.logger.info(`Metrics server running on port ${this.port}`);
+      this.logger.info(`WebSocket enabled on http://localhost:${this.port}`);
       if (this.streamHub && typeof this.streamHub.start === 'function') {
         this.streamHub.start(this.server).catch((error) => {
           this.logger.error('Failed to start realtime stream hub', { error: error.message });
         });
       }
-    });
-
-    this.server.listen(this.port, () => {
-      this.logger.info(`Server running on port ${this.port}`);
-      this.logger.info(`WebSocket enabled on http://localhost:${this.port}`);
     });
   }
 
