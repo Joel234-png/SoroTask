@@ -64,6 +64,8 @@ pub enum Error {
     InvalidInsurancePolicy = 33,
     TaskNotFound = 36,
     InvalidUpgradeVersion = 37,
+    BountyBelowMinimum = 38,
+    InvalidBounty = 39,
 }
 
 #[contracttype]
@@ -652,6 +654,7 @@ pub enum DataKey {
     DelegationCounter,
     KeeperReputation(Address),
     KeeperReputationCounter,
+    MinBounty,
 }
 
 fn enter_security_guard(env: &Env) {
@@ -869,6 +872,28 @@ fn require_proxy_admin(env: &Env, admin: &Address) -> ProxyConfig {
     config
 }
 
+fn get_min_bounty(env: &Env) -> i128 {
+    env.storage()
+        .instance()
+        .get(&DataKey::MinBounty)
+        .unwrap_or(0)
+}
+
+fn require_config_admin(env: &Env, admin: &Address) {
+    let configured_admin: Address = env
+        .storage()
+        .instance()
+        .get(&DataKey::AdminAddress)
+        .or_else(|| read_proxy_config(env).map(|config| config.admin))
+        .unwrap_or_else(|| panic_with_error!(env, Error::NotInitialized));
+
+    admin.require_auth();
+
+    if &configured_admin != admin {
+        panic_with_error!(env, Error::Unauthorized);
+    }
+}
+
 #[contract]
 pub struct InsuranceContract;
 
@@ -1059,6 +1084,10 @@ impl SoroTaskContract {
             panic_with_error!(&env, Error::InvalidInterval);
         }
 
+        if config.gas_balance < get_min_bounty(&env) {
+            panic_with_error!(&env, Error::BountyBelowMinimum);
+        }
+
         // Validate payload arguments before storage
         if let Err(e) = Self::validate_args(&config.args) {
             panic_with_error!(&env, e);
@@ -1132,6 +1161,36 @@ impl SoroTaskContract {
             .persistent()
             .get(&DataKey::Counter)
             .unwrap_or(0)
+    }
+
+    /// Returns the globally configured minimum bounty required for task registration.
+    pub fn get_min_bounty(env: Env) -> i128 {
+        get_min_bounty(&env)
+    }
+
+    /// Updates the globally required minimum bounty for new task registrations.
+    pub fn set_min_bounty(env: Env, admin: Address, min_bounty: i128) {
+        enter_security_guard(&env);
+
+        require_config_admin(&env, &admin);
+
+        if min_bounty < 0 {
+            panic_with_error!(&env, Error::InvalidBounty);
+        }
+
+        env.storage()
+            .instance()
+            .set(&DataKey::MinBounty, &min_bounty);
+
+        env.events().publish(
+            (
+                Symbol::new(&env, "MinBountyUpdated"),
+                Symbol::new(&env, "v1"),
+            ),
+            (admin, min_bounty),
+        );
+
+        exit_security_guard(&env);
     }
 
     pub fn monitor(env: Env) -> Vec<ExecutableTask> {
