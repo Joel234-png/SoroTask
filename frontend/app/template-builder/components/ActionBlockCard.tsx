@@ -140,14 +140,27 @@ export function ActionBlockCard({
                   <span className="ml-1 text-red-400" aria-label="required">*</span>
                 )}
               </label>
-              <input
-                id={`${block.instanceId}-arg-${param.name}`}
-                type="text"
-                value={block.args[param.name] ?? ''}
-                onChange={(e) => onArgChange(block.instanceId, param.name, e.target.value)}
-                placeholder={param.optional ? 'optional' : 'required'}
-                className="w-full bg-neutral-800 border border-neutral-700 rounded px-2 py-1.5 text-xs font-mono text-neutral-200 placeholder-neutral-600 outline-none focus:ring-1 focus:ring-blue-500 focus:border-blue-500"
-              />
+              {param.type === 'bool' ? (
+                <select
+                  id={`${block.instanceId}-arg-${param.name}`}
+                  value={block.args[param.name] ?? ''}
+                  onChange={(e) => onArgChange(block.instanceId, param.name, e.target.value)}
+                  className="w-full bg-neutral-800 border border-neutral-700 rounded px-2 py-1.5 text-xs font-mono text-neutral-200 placeholder-neutral-600 outline-none focus:ring-1 focus:ring-blue-500 focus:border-blue-500"
+                >
+                  <option value="">{param.optional ? 'optional' : 'select value'}</option>
+                  <option value="true">true</option>
+                  <option value="false">false</option>
+                </select>
+              ) : (
+                <input
+                  id={`${block.instanceId}-arg-${param.name}`}
+                  type={['u8', 'u16', 'u32', 'u64', 'u128', 'i8', 'i16', 'i32', 'i64', 'i128'].includes(param.type) ? 'number' : 'text'}
+                  value={block.args[param.name] ?? ''}
+                  onChange={(e) => onArgChange(block.instanceId, param.name, e.target.value)}
+                  placeholder={param.optional ? 'optional' : 'required'}
+                  className="w-full bg-neutral-800 border border-neutral-700 rounded px-2 py-1.5 text-xs font-mono text-neutral-200 placeholder-neutral-600 outline-none focus:ring-1 focus:ring-blue-500 focus:border-blue-500"
+                />
+              )}
             </div>
           ))}
         </div>

@@ -1,0 +1,26 @@
+{
+  "name": "zk-proof-service",
+  "version": "1.0.0",
+  "description": "This module implements a backend worker pool dedicated to generating ZK proofs for privacy-preserving task conditions on behalf of light clients. It is designed as an MVP-critical feature to elevate the capabilities and stability of the SoroTask platform.",
+  "main": "index.js",
+  "scripts": {
+    "start": "node server.js",
+    "test": "jest",
+    "docker:build": "docker build -t sorotask-zk-proof-service .",
+    "docker:run": "docker run -p 3100:3100 sorotask-zk-proof-service"
+  },
+  "keywords": [],
+  "author": "",
+  "license": "ISC",
+  "type": "commonjs",
+  "dependencies": {
+    "express": "^5.2.1"
+  },
+  "devDependencies": {
+    "jest": "^30.4.2",
+    "supertest": "^7.2.2"
+  },
+  "jest": {
+    "testEnvironment": "node"
+  }
+}

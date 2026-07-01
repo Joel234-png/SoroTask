@@ -52,6 +52,9 @@ jest.mock('@sentry/react', () => ({
   withProfiler: (Component) => Component,
 }))
 
+// Mock scrollIntoView for jsdom (used by ZKProofLogStream)
+Element.prototype.scrollIntoView = jest.fn()
+
 // Suppress known Tiptap duplicate-extension warning in tests
 const originalWarn = console.warn.bind(console)
 beforeAll(() => {
