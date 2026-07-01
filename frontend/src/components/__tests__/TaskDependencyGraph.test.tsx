@@ -4,6 +4,12 @@ import TaskDependencyGraph from "../TaskDependencyGraph";
 import { useTaskStore } from "@/src/store/taskStore";
 import type { Task } from "@/src/types/task";
 
+jest.mock("@/src/components/graph/CanvasNodeGraphEditor", () => ({
+  CanvasNodeGraphEditor: ({ nodes }: { nodes: Array<{ id: string }> }) => (
+    <div data-testid="canvas-node-graph-editor">{nodes.length}</div>
+  ),
+}));
+
 // ReactFlow requires a browser canvas and ResizeObserver — mock it entirely.
 jest.mock("reactflow", () => {
   const React = require("react");
@@ -133,6 +139,11 @@ describe("rendering nodes", () => {
     expect(
       screen.getByRole("img", { name: /task dependency graph/i })
     ).toBeInTheDocument();
+  });
+
+  it("renders canvas mode when requested", () => {
+    render(<TaskDependencyGraph renderMode="canvas" />);
+    expect(screen.getByTestId("canvas-node-graph-editor")).toBeInTheDocument();
   });
 });
 
