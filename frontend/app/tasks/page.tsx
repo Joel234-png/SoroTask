@@ -1,17 +1,30 @@
 "use client";
 
-import { useState, useEffect, useRef } from "react";
+import { useState, useEffect, useMemo, useRef } from "react";
 import { useTasks } from "@/src/hooks/tasks";
 import { useLayoutStore } from "@/src/store/layoutStore";
 import SplitPaneLayout from "@/src/components/layout/SplitPaneLayout";
 import TaskCardWithSelection from "@/components/TaskCardWithSelection";
 import type { TaskFilters } from "@/src/lib/query/keys";
 
+const TASKS_PER_PAGE = 10;
+
 export default function TasksPage() {
   const [filters, setFilters] = useState<TaskFilters>({});
+  const [currentPage, setCurrentPage] = useState(1);
   const { data: tasks, isLoading } = useTasks(filters);
   const { listScrollPosition, saveListScrollPosition } = useLayoutStore();
   const listRef = useRef<HTMLDivElement>(null);
+  const totalTasks = tasks?.length ?? 0;
+  const totalPages = Math.max(1, Math.ceil(totalTasks / TASKS_PER_PAGE));
+  const pageStart = totalTasks === 0 ? 0 : (currentPage - 1) * TASKS_PER_PAGE + 1;
+  const pageEnd = Math.min(currentPage * TASKS_PER_PAGE, totalTasks);
+  const paginatedTasks = useMemo(() => {
+    if (!tasks) return [];
+
+    const startIndex = (currentPage - 1) * TASKS_PER_PAGE;
+    return tasks.slice(startIndex, startIndex + TASKS_PER_PAGE);
+  }, [currentPage, tasks]);
 
   // Restore scroll position on mount
   useEffect(() => {
@@ -27,6 +40,29 @@ export default function TasksPage() {
     }
   };
 
+  const updateFilters = (updater: (filters: TaskFilters) => TaskFilters) => {
+    setCurrentPage(1);
+    setFilters(updater);
+  };
+
+  const goToPage = (page: number) => {
+    setCurrentPage(Math.max(1, Math.min(page, totalPages)));
+    if (listRef.current) {
+      listRef.current.scrollTop = 0;
+      saveListScrollPosition(0);
+    }
+  };
+
+  useEffect(() => {
+    if (currentPage > totalPages) {
+      setCurrentPage(totalPages);
+      if (listRef.current) {
+        listRef.current.scrollTop = 0;
+        saveListScrollPosition(0);
+      }
+    }
+  }, [currentPage, saveListScrollPosition, totalPages]);
+
   return (
     <SplitPaneLayout>
       <div className="h-full flex flex-col bg-neutral-950">
@@ -39,7 +75,7 @@ export default function TasksPage() {
             <select
               value={filters.status || ""}
               onChange={(e) =>
-                setFilters((prev) => ({
+                updateFilters((prev) => ({
                   ...prev,
                   status: e.target.value as any || undefined,
                 }))
@@ -58,7 +94,7 @@ export default function TasksPage() {
               placeholder="Search tasks..."
               value={filters.search || ""}
               onChange={(e) =>
-                setFilters((prev) => ({ ...prev, search: e.target.value || undefined }))
+                updateFilters((prev) => ({ ...prev, search: e.target.value || undefined }))
               }
               className="bg-neutral-900 border border-neutral-700 rounded-lg px-3 py-2 text-sm text-neutral-200 flex-1 max-w-md"
             />
@@ -90,12 +126,41 @@ export default function TasksPage() {
 
           {!isLoading && tasks && tasks.length > 0 && (
             <div className="space-y-4">
-              {tasks.map((task: any) => (
+              {paginatedTasks.map((task: any) => (
                 <TaskCardWithSelection key={task.id} task={task} />
               ))}
             </div>
           )}
         </div>
+
+        {!isLoading && totalTasks > 0 && (
+          <div className="flex flex-col gap-3 border-t border-neutral-700 px-6 py-4 text-sm text-neutral-300 sm:flex-row sm:items-center sm:justify-between">
+            <p aria-live="polite">
+              Showing {pageStart}-{pageEnd} of {totalTasks} tasks
+            </p>
+            <div className="flex items-center gap-3">
+              <button
+                type="button"
+                onClick={() => goToPage(currentPage - 1)}
+                disabled={currentPage === 1}
+                className="rounded-lg border border-neutral-700 px-4 py-2 font-medium text-neutral-100 transition hover:bg-neutral-800 disabled:cursor-not-allowed disabled:opacity-50"
+              >
+                Previous
+              </button>
+              <span className="min-w-20 text-center text-neutral-400">
+                Page {currentPage} of {totalPages}
+              </span>
+              <button
+                type="button"
+                onClick={() => goToPage(currentPage + 1)}
+                disabled={currentPage === totalPages}
+                className="rounded-lg border border-neutral-700 px-4 py-2 font-medium text-neutral-100 transition hover:bg-neutral-800 disabled:cursor-not-allowed disabled:opacity-50"
+              >
+                Next
+              </button>
+            </div>
+          </div>
+        )}
       </div>
     </SplitPaneLayout>
   );
