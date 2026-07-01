@@ -62,12 +62,20 @@ describe("WidgetGrid", () => {
       expect(screen.getByText("Test Widget 2")).toBeInTheDocument();
     });
 
-    it("renders widget content via render function", () => {
+    it("renders widget content via render function for resolved widgets", () => {
       render(<WidgetGrid widgetRegistry={mockWidgets} storageKey={customStorageKey} />);
 
       expect(screen.getByTestId("widget1-content")).toBeInTheDocument();
-      expect(screen.getByTestId("widget2-content")).toBeInTheDocument();
       expect(screen.getByTestId("widget3-content")).toBeInTheDocument();
+    });
+
+    it("renders a skeleton instead of content while a widget is loading", () => {
+      render(<WidgetGrid widgetRegistry={mockWidgets} storageKey={customStorageKey} />);
+
+      expect(screen.getByTestId("widget-widget2")).toContainElement(
+        screen.getByLabelText("Loading widget data")
+      );
+      expect(screen.queryByTestId("widget2-content")).not.toBeInTheDocument();
     });
 
     it("displays status badges for each widget", () => {

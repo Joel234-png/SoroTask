@@ -1,6 +1,7 @@
 "use client";
 
 import { useEffect, useMemo, useState } from "react";
+import { WidgetSkeleton } from "@/components/skeletons";
 
 export type WidgetStatus = "loading" | "empty" | "error" | "success";
 export type WidgetSize = "small" | "medium" | "large";
@@ -211,7 +212,11 @@ export function WidgetGrid({
                   {status}
                 </span>
               </div>
-              {widget.render()}
+              {status === "loading" ? (
+                <WidgetSkeleton size={widget.defaultSize} />
+              ) : (
+                widget.render()
+              )}
             </article>
           );
         })}
