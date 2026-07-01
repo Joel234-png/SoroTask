@@ -2,6 +2,7 @@
 
 import { useState, useEffect, useRef, useMemo } from "react";
 import { useRouter } from "next/navigation";
+import { useWallet } from "@/app/context/WalletContext";
 
 // Define the structure of a command
 type Command = {
@@ -47,6 +48,7 @@ export function CommandPalette() {
   const inputRef = useRef<HTMLInputElement>(null);
   const listRef = useRef<HTMLDivElement>(null);
   const router = useRouter();
+  const { openConnectModal } = useWallet();
 
   // Define commands
   const commands: Command[] = useMemo(() => [
@@ -81,7 +83,7 @@ export function CommandPalette() {
       title: "Connect Wallet",
       icon: Icons.Wallet,
       group: "Actions",
-      perform: () => alert("Connecting wallet..."),
+      perform: () => openConnectModal(),
     },
     {
       id: "action-create",
@@ -100,7 +102,7 @@ export function CommandPalette() {
       group: "Actions",
       perform: () => alert("Theme toggled!"),
     },
-  ], [router]);
+  ], [router, openConnectModal]);
 
   // Fuzzy search implementation
   function fuzzyMatch(pattern: string, text: string): { matched: boolean; score: number } {

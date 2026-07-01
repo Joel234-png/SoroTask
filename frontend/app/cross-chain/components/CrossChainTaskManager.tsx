@@ -4,6 +4,7 @@ import React, { useMemo } from 'react';
 import { useCrossChainTasks } from '../useCrossChainTasks';
 import { CrossChainTaskRow } from './CrossChainTaskRow';
 import { NETWORKS, type NetworkId, type CrossChainTaskStatus } from '../types';
+import { StateProofVerifierPanel } from './StateProofVerifierPanel';
 
 const STATUS_FILTERS: Array<CrossChainTaskStatus | 'all'> = ['all', 'active', 'paused', 'completed', 'failed'];
 
@@ -17,6 +18,7 @@ const BRIDGE_EVENT_LABELS = {
 export function CrossChainTaskManager() {
   const {
     tasks,
+    allTasks,
     bridgeEvents,
     networkFilter,
     statusFilter,
@@ -166,6 +168,8 @@ export function CrossChainTaskManager() {
             </div>
           )}
         </section>
+
+        <StateProofVerifierPanel tasks={allTasks} bridgeEvents={bridgeEvents} />
       </div>
     </div>
   );

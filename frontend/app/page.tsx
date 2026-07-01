@@ -1,4 +1,5 @@
 import Link from "next/link";
+import { WalletNavSlot } from "@/app/components/WalletNavSlot";
 import {
   FiActivity,
   FiArrowRight,
@@ -155,13 +156,16 @@ export default function HomePage() {
               Settings
             </Link>
           </div>
-          <Link
-            href="/tasks"
-            className="inline-flex items-center gap-2 rounded-full bg-emerald-300 px-4 py-2 text-sm font-semibold text-slate-950 shadow-lg shadow-emerald-950/30 transition hover:bg-emerald-200"
-          >
-            Launch
-            <FiArrowRight aria-hidden="true" />
-          </Link>
+          <div className="flex items-center gap-3">
+            <WalletNavSlot />
+            <Link
+              href="/tasks"
+              className="inline-flex items-center gap-2 rounded-full bg-emerald-300 px-4 py-2 text-sm font-semibold text-slate-950 shadow-lg shadow-emerald-950/30 transition hover:bg-emerald-200"
+            >
+              Launch
+              <FiArrowRight aria-hidden="true" />
+            </Link>
+          </div>
         </nav>
 
         <div className="mx-auto grid w-full max-w-7xl gap-10 pb-16 pt-14 lg:grid-cols-[1.02fr_0.98fr] lg:items-center lg:pb-20 lg:pt-20">

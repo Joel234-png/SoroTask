@@ -35,9 +35,9 @@ export default function RootLayout({
       <body
         className={`${geistSans.variable} ${geistMono.variable} antialiased`}
       >
-        <CommandPalette />
         <AIAssistantProvider>
           <AppProviders>
+            <CommandPalette />
             {children}
           </AppProviders>
         </AIAssistantProvider>

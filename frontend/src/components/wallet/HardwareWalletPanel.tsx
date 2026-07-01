@@ -59,7 +59,7 @@ export function HardwareWalletPanel({ onSessionChange }: Props) {
     >
       <h2 className="text-lg font-semibold text-neutral-100">Hardware wallet</h2>
       <p className="mt-1 text-sm text-neutral-400">
-        Sign batched task registrations with Ledger (WebHID) or Trezor Connect.
+        Sign batched task registrations with Ledger WebUSB or Trezor Connect.
       </p>
 
       <div className="mt-4 flex flex-wrap gap-2">
