@@ -1,7 +1,10 @@
+extern crate std; // This test module is compiled with std even though the crate is #![no_std].
+
 use crate::{SoroTaskContract, SoroTaskContractClient, TaskConfig};
 use soroban_sdk::{
     contract, contractimpl,
     testutils::{Address as _, Ledger},
+    xdr::ToXdr,
     Address, Env, Symbol, Vec,
 };
 
@@ -40,14 +43,17 @@ fn base_config(env: &Env, target: Address) -> TaskConfig {
     }
 }
 
-fn track_gas<F>(env: &Env, _name: &str, operation: F)
+fn track_gas<F>(env: &Env, name: &str, operation: F)
 where
     F: FnOnce(),
 {
     env.cost_estimate().budget().reset_tracker();
     operation();
-    let _cpu = env.cost_estimate().budget().cpu_instruction_cost();
-    let _mem = env.cost_estimate().budget().memory_bytes_cost();
+    let cpu = env.cost_estimate().budget().cpu_instruction_cost();
+    let mem = env.cost_estimate().budget().memory_bytes_cost();
+    // Native test binary (not wasm), so eprintln works; visible with
+    // `cargo test -- --nocapture`.
+    std::eprintln!("[gas] {name}: cpu_instructions={cpu} memory_bytes={mem}");
     // Note: println not available in wasm tests
     // Gas tracking available when running with cargo test -- --nocapture
 }
@@ -188,4 +194,28 @@ fn test_gas_cancel() {
     track_gas(&env, "cancel_task", || {
         client.cancel_task(&task_id);
     });
+}
+
+/// Regression benchmark for the `TaskConfig` storage footprint (issue: reduce
+/// storage costs). Measures the actual persistent-storage encoding size
+/// (XDR-serialized bytes, the thing that determines ledger rent) rather than
+/// execution CPU/memory, which `track_gas` measures instead.
+///
+/// `interval` moved from `u64` to `u32`: each XDR `ScVal` integer is a 4-byte
+/// type discriminant plus the value, word-aligned to 4 bytes - `U64` costs 12
+/// bytes, `U32` costs 8, so this alone saves 4 bytes per stored `TaskConfig`.
+/// The assertion below locks in the current size so a future change that
+/// grows the struct again shows up as a failing test, not a silent regression.
+#[test]
+fn test_task_config_storage_footprint() {
+    let env = Env::default();
+    let cfg = base_config(&env, Address::generate(&env));
+
+    let size = cfg.to_xdr(&env).len();
+    std::eprintln!("[storage] TaskConfig XDR size: {size} bytes");
+
+    assert_eq!(
+        size, 408,
+        "TaskConfig's serialized size changed - update this benchmark if the change is intentional"
+    );
 }

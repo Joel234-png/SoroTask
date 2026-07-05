@@ -30,7 +30,7 @@ proptest! {
 
     #[test]
     fn test_task_creation_invariants(
-        interval in 1u64..100_000_000,
+        interval in 1u32..100_000_000,
         gas_balance in 0i128..10_000_000i128,
     ) {
         let (env, client) = setup_env_and_client();
