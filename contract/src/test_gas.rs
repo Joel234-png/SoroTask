@@ -78,11 +78,13 @@ fn test_gas_register() {
 #[test]
 fn test_gas_monitor_active_index() {
     let (env, client) = setup();
-    let target = env.register(MockTarget, ());
-    let cfg = base_config(&env, target);
 
+    // Distinct targets so each registration is a distinct task rather than a
+    // rejected duplicate - this benchmark only cares about having 32 active
+    // tasks, not that they share a target.
     for _ in 0..32 {
-        client.register(&cfg);
+        let target = env.register(MockTarget, ());
+        client.register(&base_config(&env, target));
     }
 
     env.ledger().set_timestamp(10_000);
