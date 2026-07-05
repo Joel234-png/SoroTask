@@ -2062,7 +2062,7 @@ impl SoroTaskContract {
             // ── Yield strategy execution ──────────────────────────────────────
             let executed_yield_strategy = if let Some(ref yield_strategy_id) = config.yield_strategy
             {
-                Self::execute_yield_strategy(env.clone(), *yield_strategy_id, task_id)
+                Self::execute_yield_strategy_internal(env, *yield_strategy_id, task_id)
                     .expect("Yield strategy execution failed");
                 true
             } else {
@@ -3222,7 +3222,23 @@ impl SoroTaskContract {
     /// Called by tasks configured to use yield harvesting.
     pub fn execute_yield_strategy(env: Env, strategy_id: u64, task_id: u64) -> Result<(), Error> {
         enter_security_guard(&env);
+        let result = Self::execute_yield_strategy_internal(&env, strategy_id, task_id);
+        exit_security_guard(&env);
+        result
+    }
 
+    /// Guard-free core of [`Self::execute_yield_strategy`].
+    ///
+    /// `execute_internal` (already inside the `execute()` guard) calls this
+    /// directly instead of the guarded public entry point above - re-entering
+    /// `enter_security_guard` while it's already held would unconditionally
+    /// panic, breaking every task that has a `yield_strategy` configured. See
+    /// `docs/security/REENTRANCY_ANALYSIS.md` for the full writeup.
+    fn execute_yield_strategy_internal(
+        env: &Env,
+        strategy_id: u64,
+        task_id: u64,
+    ) -> Result<(), Error> {
         // Get the yield strategy
         let strategy: YieldStrategyConfig = env
             .storage()
@@ -3231,7 +3247,7 @@ impl SoroTaskContract {
             .expect("Yield strategy not found");
 
         if !strategy.is_active {
-            panic_with_error!(&env, Error::YieldStrategyNotInitialized);
+            panic_with_error!(env, Error::YieldStrategyNotInitialized);
         }
 
         // Check if we need to harvest (simplified logic)
@@ -3256,15 +3272,14 @@ impl SoroTaskContract {
             // Emit YieldHarvested event
             env.events().publish(
                 (
-                    Symbol::new(&env, "YieldHarvested"),
-                    Symbol::new(&env, "v1"),
+                    Symbol::new(env, "YieldHarvested"),
+                    Symbol::new(env, "v1"),
                     strategy_id,
                 ),
                 (task_id, strategy_id),
             );
         }
 
-        exit_security_guard(&env);
         Ok(())
     }
 
@@ -6251,6 +6266,65 @@ pub(crate) mod tests {
         assert!(result.is_err(), "reentrant pause must abort execution");
         assert!(client.get_task(&victim_id).unwrap().is_active);
         assert_eq!(client.get_task(&malicious_id).unwrap().last_run, 0);
+    }
+
+    /// Regression test for a false-positive reentrancy trip: `execute()`
+    /// acquires the guard, then `execute_internal()` used to call the
+    /// *guarded* `execute_yield_strategy()` for any task with a
+    /// `yield_strategy` set, which immediately re-entered `enter_security_guard`
+    /// while the outer guard was still held and panicked - so every
+    /// yield-strategy task failed to execute at all. See
+    /// `docs/security/REENTRANCY_ANALYSIS.md`.
+    #[test]
+    fn test_execute_with_yield_strategy_does_not_trip_reentrancy_guard() {
+        let (env, id) = setup();
+        let client = SoroTaskContractClient::new(&env, &id);
+
+        // Real gas token + admin, so the keeper-fee transfer inside execute()
+        // has an actual token to move (init_proxy sets both DataKey::Token and
+        // DataKey::AdminAddress in one call).
+        let admin = Address::generate(&env);
+        let token_admin = Address::generate(&env);
+        let token_id = env.register_stellar_asset_contract_v2(token_admin);
+        let token_address = token_id.address();
+        let token_client = soroban_sdk::token::Client::new(&env, &token_address);
+        let token_admin_client = soroban_sdk::token::StellarAssetClient::new(&env, &token_address);
+        client.init_proxy(&admin, &token_address, &1);
+
+        let target = env.register(MockTarget, ());
+        let protocol = env.register(MockTarget, ());
+
+        client.init_yield_strategy(
+            &protocol,
+            &Symbol::new(&env, "ping"),
+            &Symbol::new(&env, "ping"),
+            &Vec::new(&env),
+            &Vec::new(&env),
+            &0,
+            &0,
+        );
+        let strategy_id = 1u64; // first strategy in a fresh env
+
+        let mut cfg = base_config(&env, target);
+        cfg.yield_strategy = Some(strategy_id);
+        cfg.gas_balance = 0;
+        let creator = cfg.creator.clone();
+        let task_id = client.register(&cfg);
+
+        token_admin_client.mint(&creator, &5000);
+        client.deposit_gas(&task_id, &creator, &5000);
+
+        let keeper = Address::generate(&env);
+        set_timestamp(&env, 3_600);
+
+        // Before the fix this panicked with "Reentrancy guard triggered"
+        // before ever reaching the fee transfer below.
+        client.execute(&keeper, &task_id);
+
+        let status = client.get_task_status(&task_id);
+        assert_eq!(status.outcome, ExecutionOutcome::Success);
+        assert_eq!(client.get_task(&task_id).unwrap().last_run, 3_600);
+        assert!(token_client.balance(&keeper) > 0, "keeper should have been paid");
     }
 
     #[test]
