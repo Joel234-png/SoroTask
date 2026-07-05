@@ -20,6 +20,30 @@ const resolvers = {
       }
       return queryAll('SELECT * FROM events ORDER BY ledger_sequence DESC LIMIT ? OFFSET ?', [limit, offset]);
     },
+    keeperStats: async (parent, { limit = 50 }) => {
+      // Aggregated at the SQL layer (not pulled into JS and summed there) so
+      // this stays cheap as the events table grows. fee is stored in the
+      // gas token's smallest unit (stroops for XLM); bountiesEarnedXlm
+      // assumes the standard 7-decimal Stellar asset scale, matching the
+      // convention the keeper's own /metrics endpoint already uses.
+      const rows = await queryAll(
+        `SELECT
+           json_extract(data_json, '$.keeper') AS address,
+           COUNT(*) AS tasks_executed,
+           SUM(CAST(json_extract(data_json, '$.fee') AS REAL)) AS fee_total_stroops
+         FROM events
+         WHERE event_name = 'KeeperPaid' AND json_extract(data_json, '$.keeper') IS NOT NULL
+         GROUP BY address
+         ORDER BY tasks_executed DESC
+         LIMIT ?`,
+        [limit],
+      );
+      return rows.map((row) => ({
+        address: row.address,
+        tasksExecuted: row.tasks_executed,
+        bountiesEarnedXlm: (row.fee_total_stroops || 0) / 1e7,
+      }));
+    },
     reconciliationLogs: async (parent, { task_id, limit = 50, offset = 0 }, context) => {
       // Role-based access control: Only Operator and Admin can view reconciliation logs
       enforceRole(context, ROLES.OPERATOR);
