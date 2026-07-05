@@ -129,7 +129,7 @@ class Proposer {
    */
   getProposal(taskId, epoch) {
     const key = `${taskId}:${epoch}`;
-    return this.proposals.get(key);
+    return this.proposals.get(key) || null;
   }
 
   /**

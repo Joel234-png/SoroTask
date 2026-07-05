@@ -3,8 +3,8 @@
 import RoleBasedAccessControl, {
   type Workspace,
 } from "@/components/RoleBasedAccessControl";
-import { useRbacUiEngine } from "./RbacUiEngineProvider";
-import { getRbacApi } from "./api";
+import { useRbacUiEngine } from "../lib/rbac/RbacUiEngineProvider";
+import { getRbacApi } from "../lib/rbac/api";
 
 const defaultWorkspace: Workspace = {
   id: "ws-default",

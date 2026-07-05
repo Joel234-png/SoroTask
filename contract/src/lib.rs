@@ -6040,7 +6040,6 @@ pub(crate) mod tests {
         let admin = Address::generate(&env);
         client.init_proxy(&admin, &token_address, &1);
 
-        client.init(&token_address);
         client.init_tokenomics_config(&TokenomicsConfig {
             staking_reward_rate: 500,
             governance_quorum_percentage: 1000,
@@ -6102,7 +6101,6 @@ pub(crate) mod tests {
         let admin = Address::generate(&env);
         client.init_proxy(&admin, &token_address, &1);
 
-        client.init(&token_address);
         client.init_tokenomics_config(&TokenomicsConfig {
             staking_reward_rate: 500,
             governance_quorum_percentage: 1000,

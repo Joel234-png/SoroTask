@@ -1,7 +1,7 @@
 "use client";
 
 import React, { useState, useEffect, useRef, useCallback } from "react";
-import { useAIAssistant } from "../hooks/useAIAssistant";
+import { useAIAssistant } from "./hooks/useAIAssistant";
 import { Drawer } from "@/components/Drawer";
 import { FiMessageSquare, FiSend, FiRefreshCw, FiChevronRight, FiX } from "react-icons/fi";
 
