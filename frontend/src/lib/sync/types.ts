@@ -213,6 +213,7 @@ export type SyncManagerActions = {
   flush: () => Promise<void>;
   reset: () => void;
   refresh: () => void;
+  getActions: () => readonly QueuedSyncAction[];
 };
 
 export type SyncManagerStore = SyncManagerState & SyncManagerActions;

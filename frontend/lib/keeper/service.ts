@@ -133,8 +133,8 @@ async function fetchWithRetry<T>(
   } catch (error) {
     let keeperError: KeeperError;
 
-    if (error instanceof KeeperError) {
-      keeperError = error;
+    if (error && typeof error === 'object' && 'type' in error && 'retriable' in error) {
+      keeperError = error as KeeperError;
     } else {
       keeperError = createKeeperError(error, {
         endpoint,

@@ -3,6 +3,10 @@ export function StatCardSkeleton() {
     <div className="animate-pulse rounded-2xl border border-slate-700 bg-slate-800/50 p-6">
       <div className="mb-3 h-4 w-24 rounded bg-slate-700" />
       <div className="h-8 w-32 rounded bg-slate-700" />
+    </div>
+  );
+}
+
 const pulse = "animate-pulse rounded bg-neutral-700/70";
 
 export function CardSkeleton() {
@@ -23,21 +27,7 @@ export function ChartSkeleton() {
   return (
     <div className="animate-pulse rounded-2xl border border-slate-700 bg-slate-800/50 p-6">
       <div className="mb-4 h-4 w-32 rounded bg-slate-700" />
-      <div className="h-40 rounded bg-slate-700/70" />
-    <div
-      className={`${pulse} h-48 w-full rounded-xl`}
-      aria-hidden="true"
-    />
-  );
-}
-
-export function TableSkeleton({ rows = 4 }: { rows?: number }) {
-  return (
-    <div className="space-y-2" aria-hidden="true">
-      <div className={`${pulse} h-4 w-full`} />
-      {Array.from({ length: rows }).map((_, index) => (
-        <div key={index} className={`${pulse} h-10 w-full`} />
-      ))}
+      <div className={`${pulse} h-48 w-full rounded-xl`} aria-hidden="true" />
     </div>
   );
 }
@@ -45,9 +35,15 @@ export function TableSkeleton({ rows = 4 }: { rows?: number }) {
 export function TableSkeleton({ rows = 5 }: { rows?: number }) {
   return (
     <div className="animate-pulse space-y-3 rounded-2xl border border-slate-700 bg-slate-800/50 p-6">
+      <div className={`${pulse} h-4 w-full mb-4`} />
       {Array.from({ length: rows }).map((_, index) => (
         <div key={index} className="h-10 rounded bg-slate-700/70" />
-export function StatCardSkeleton({ cards = 3 }: { cards?: number }) {
+      ))}
+    </div>
+  );
+}
+
+export function StatCardGroupSkeleton({ cards = 3 }: { cards?: number }) {
   return (
     <div
       className="grid grid-cols-1 gap-3 sm:grid-cols-3"

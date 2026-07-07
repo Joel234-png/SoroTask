@@ -61,7 +61,24 @@ export function TemplateBuilder({ onSubmit }: TemplateBuilderProps) {
 
   function handleDropDefinition(definitionId: string) {
     const def = resolveDefinition(definitionId);
-    if (def) addBlock(def);
+    if (def) {
+      handleAddBlockFromDef(def);
+    }
+  }
+
+  function handleAddBlockFromDef(def: any) {
+    addBlock({
+        instanceId: `block-${Date.now()}`,
+        definitionId: def.id,
+        label: def.label,
+        category: def.category,
+        icon: def.icon,
+        contractAddress: def.defaultContractAddress ?? '',
+        functionName: def.functionName,
+        inputs: def.inputs,
+        args: {},
+        isConfigured: def.inputs.filter((p: any) => !p.optional).length === 0,
+      });
   }
 
   function handleSubmit() {
@@ -170,12 +187,12 @@ export function TemplateBuilder({ onSubmit }: TemplateBuilderProps) {
       <div className="flex flex-1 overflow-hidden">
         <ActionPalette
           importedAbis={importedAbis}
-          onAddBlock={addBlock}
+          onAddBlock={handleAddBlockFromDef}
           onImportAbi={importAbi}
         />
         <FlowCanvas
           blocks={blocks}
-          onAddBlock={addBlock}
+          onAddBlock={handleAddBlockFromDef}
           onRemoveBlock={removeBlock}
           onArgChange={updateArg}
           onContractChange={updateContractAddress}

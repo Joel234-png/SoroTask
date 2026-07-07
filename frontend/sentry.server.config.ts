@@ -7,12 +7,12 @@ if (SENTRY_DSN) {
     dsn: SENTRY_DSN,
     tracesSampleRate: 0.1,
     beforeSend(event, hint) {
-      return filterSensitiveData(event);
+      return filterSensitiveData(event as any) as any;
     },
   });
 }
 
-function filterSensitiveData(event: Sentry.Event): Sentry.Event {
+function filterSensitiveData(event: any): any {
   const sensitiveKeys = ["password", "token", "secret", "authorization", "cookie"];
 
   if (event.request?.headers_fields) {

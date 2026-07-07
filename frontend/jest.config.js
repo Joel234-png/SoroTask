@@ -48,6 +48,7 @@ const customConfig = {
   moduleNameMapper: {
     '^@/(.*)$': '<rootDir>/$1',
   },
+  transformIgnorePatterns: ['/node_modules/(?!(@noble|@stellar)/)'],
 };
 
 module.exports = createJestConfig(customConfig);

@@ -123,7 +123,7 @@ export class EncryptionKeyManager {
       );
 
       const cryptoKey = await this.subtle.deriveKey(
-        { name: 'PBKDF2', salt, iterations, hash },
+        { name: 'PBKDF2', salt: salt as BufferSource, iterations, hash },
         rawPasswordKey,
         { name: 'AES-GCM', length: AES_KEY_LENGTH },
         true,
@@ -174,14 +174,14 @@ export class EncryptionKeyManager {
       const encoded = getTextEncoder().encode(plaintext);
 
       const cipherBuffer = await this.subtle.encrypt(
-        { name: meta.algorithm, iv },
+        { name: meta.algorithm, iv: iv as BufferSource },
         cryptoKey,
-        encoded,
+        encoded as BufferSource,
       );
 
       return {
         ciphertext: toBase64(cipherBuffer),
-        iv: toBase64(iv),
+        iv: toBase64(iv.buffer),
         keyId: resolvedKeyId,
         algorithm: meta.algorithm,
       };
@@ -201,9 +201,9 @@ export class EncryptionKeyManager {
       const ciphertext = fromBase64(payload.ciphertext);
 
       const plainBuffer = await this.subtle.decrypt(
-        { name: payload.algorithm, iv },
+        { name: payload.algorithm, iv: iv as BufferSource },
         cryptoKey,
-        ciphertext,
+        ciphertext as BufferSource,
       );
 
       return getTextDecoder().decode(plainBuffer);
@@ -227,13 +227,13 @@ export class EncryptionKeyManager {
       const iv = globalThis.crypto.getRandomValues(new Uint8Array(12));
       const wrappedBuffer = await this.subtle.wrapKey('raw', keyToWrap, wrappingKey, {
         name: 'AES-GCM',
-        iv,
+        iv: iv as BufferSource,
       });
 
       const record: WrappedKeyRecord = {
         keyId,
         wrappedKey: toBase64(wrappedBuffer),
-        iv: toBase64(iv),
+        iv: toBase64(iv.buffer),
         algorithm: meta.algorithm,
         purpose: meta.purpose,
         createdAt: meta.createdAt,
@@ -263,9 +263,9 @@ export class EncryptionKeyManager {
 
       const cryptoKey = await this.subtle.unwrapKey(
         'raw',
-        wrappedKey,
+        wrappedKey as BufferSource,
         wrappingKey,
-        { name: 'AES-GCM', iv },
+        { name: 'AES-GCM', iv: iv as BufferSource },
         { name: record.algorithm, length: AES_KEY_LENGTH },
         true,
         usages,

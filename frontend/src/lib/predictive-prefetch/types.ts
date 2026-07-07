@@ -68,7 +68,7 @@ export interface PrefetchMetrics {
 }
 
 export interface PrefetchEvent {
-  type: "prediction" | "prefetch" | "visit" | "error" | "reset";
+  type: "prediction" | "prefetch" | "visit" | "error" | "reset" | "navigation";
   data: unknown;
   timestamp: number;
 }

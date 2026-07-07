@@ -23,7 +23,7 @@ function createPolymorphicComponent<
   T extends React.ElementType,
   P = {}
 >(comp: React.ForwardRefExoticComponent<PolymorphicComponentProp<T, P>>, name?: string) {
-  (comp as Record<string, unknown>).displayName = name;
+  (comp as any).displayName = name;
   return comp as PolymorphicComponent<T, P>;
 }
 

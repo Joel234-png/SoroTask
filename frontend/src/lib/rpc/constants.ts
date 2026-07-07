@@ -28,7 +28,7 @@ export const DEFAULT_ENDPOINTS: RPCEndpointConfig[] = [
   },
 ];
 
-export const DEFAULT_RPC_MONITOR_CONFIG: RPCHealthMonitorConfig = {
+export const DEFAULT_RPC_MONITOR_CONFIG: Required<RPCHealthMonitorConfig> = {
   endpoints: DEFAULT_ENDPOINTS,
   globalIntervalMs: DEFAULT_HEALTH_CHECK_INTERVAL_MS,
   globalTimeoutMs: DEFAULT_TIMEOUT_MS,

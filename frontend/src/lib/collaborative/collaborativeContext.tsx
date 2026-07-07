@@ -58,11 +58,11 @@ export function CollaborativeProvider({
 
   // Initialize CRDT and sync engine
   useEffect(() => {
-    let unsubscribeConnected = () => undefined;
-    let unsubscribeDisconnected = () => undefined;
-    let unsubscribeSync = () => undefined;
-    let unsubscribeUserJoined = () => undefined;
-    let unsubscribeError = () => undefined;
+    let unsubscribeConnected: () => void = () => {};
+    let unsubscribeDisconnected: () => void = () => {};
+    let unsubscribeSync: () => void = () => {};
+    let unsubscribeUserJoined: () => void = () => {};
+    let unsubscribeError: () => void = () => {};
 
     const cleanup = () => {
       unsubscribeConnected();

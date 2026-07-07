@@ -15,14 +15,14 @@ import type {
   QueuedSyncAction,
   SyncStatus,
   ConnectionQuality,
-} from "./SyncContext";
+} from "@/src/lib/sync/types";
 import type {
   SyncOperationType,
   SyncPayload,
 } from "@/src/lib/sync/types";
 
 export function useBackgroundSync(): {
-  state: ReturnType<typeof useSyncContext>["state"];
+  state: ReturnType<typeof useSyncContext>;
   isOnline: boolean;
   isSyncing: boolean;
   connectionQuality: ConnectionQuality;
@@ -54,16 +54,16 @@ export function useBackgroundSync(): {
   const store = useSyncContext();
 
   return {
-    state: store.state,
-    isOnline: store.state.network.online,
-    isSyncing: store.state.status === "syncing",
-    connectionQuality: store.state.network.quality,
-    syncStatus: store.state.status,
-    pendingCount: store.state.pendingCount,
-    failedCount: store.state.failedCount,
-    inFlightCount: store.state.inFlightCount,
-    metrics: store.state.metrics,
-    lastSyncAt: store.state.lastSyncAt,
+    state: store,
+    isOnline: store.network?.online ?? true,
+    isSyncing: store.status === "syncing",
+    connectionQuality: store.network?.quality ?? "good",
+    syncStatus: store.status,
+    pendingCount: store.pendingCount,
+    failedCount: store.failedCount,
+    inFlightCount: store.inFlightCount,
+    metrics: store.metrics,
+    lastSyncAt: store.lastSyncAt,
     enqueue: store.enqueue as any,
     retry: store.retry,
     cancel: store.cancel,

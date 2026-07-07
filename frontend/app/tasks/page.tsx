@@ -1,6 +1,6 @@
 "use client";
 
-import { useState, useEffect, useMemo, useRef } from "react";
+import { useState, useEffect, useMemo, useRef, Suspense } from "react";
 import { useTasks } from "@/src/hooks/tasks";
 import { useLayoutStore } from "@/src/store/layoutStore";
 import SplitPaneLayout from "@/src/components/layout/SplitPaneLayout";
@@ -9,7 +9,7 @@ import type { TaskFilters } from "@/src/lib/query/keys";
 
 const TASKS_PER_PAGE = 10;
 
-export default function TasksPage() {
+function TasksPageContent() {
   const [filters, setFilters] = useState<TaskFilters>({});
   const [currentPage, setCurrentPage] = useState(1);
   const { data: tasks, isLoading } = useTasks(filters);
@@ -163,5 +163,13 @@ export default function TasksPage() {
         )}
       </div>
     </SplitPaneLayout>
+  );
+}
+
+export default function TasksPage() {
+  return (
+    <Suspense fallback={<div className="h-full flex items-center justify-center text-neutral-400">Loading Tasks...</div>}>
+      <TasksPageContent />
+    </Suspense>
   );
 }

@@ -67,7 +67,7 @@ describe('PostgresShardManager', () => {
   test('does not scale up before threshold due to hysteresis', () => {
     const target = calculateDesiredDbShardCount(
       { activeUsers: 0, pendingTasks: 7000 },
-      { baseCount: 1, maxCount: 6, taskCapacityPerShard: 5000, scaleUpThreshold: 0.9 },
+      { baseCount: 2, maxCount: 6, taskCapacityPerShard: 10000, scaleUpThreshold: 0.9 },
       1,
     );
     expect(target).toBe(1);
@@ -75,7 +75,7 @@ describe('PostgresShardManager', () => {
 
   test('does not scale down until load is low enough', () => {
     const target = calculateDesiredDbShardCount(
-      { activeUsers: 100, pendingTasks: 200 },
+      { activeUsers: 350, pendingTasks: 200 },
       { baseCount: 1, maxCount: 6, userCapacityPerShard: 500, taskCapacityPerShard: 5000, scaleDownThreshold: 0.2 },
       3,
     );

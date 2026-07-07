@@ -15,7 +15,7 @@ import {
   SelectionState,
   KeeperStatistics,
 } from '@/types/keeper';
-import { keeperService } from './service';
+import { keeperService } from '@/lib/keeper/service';
 
 /**
  * Store State

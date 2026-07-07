@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useMemo, useState } from "react";
+import React, { useEffect, useMemo, useState } from "react";
 import { WidgetSkeleton } from "@/components/skeletons";
 
 export type WidgetStatus = "loading" | "empty" | "error" | "success";
@@ -12,7 +12,7 @@ export type WidgetDefinition = {
   description: string;
   defaultSize: WidgetSize;
   getStatus: () => WidgetStatus;
-  render: () => JSX.Element;
+  render: () => React.ReactNode;
 };
 
 export type DashboardConfig = {

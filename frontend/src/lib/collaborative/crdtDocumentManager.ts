@@ -15,6 +15,8 @@ import type {
   CollaborativeEventType,
 } from './types';
 
+import { Awareness } from 'y-protocols/awareness';
+
 type EventListener = (event: CollaborativeEvent) => void;
 
 /**
@@ -39,7 +41,7 @@ export class CRDTDocumentManager {
   private enablePersistence: boolean = false;
   private ymap: Y.Map<any>;
   private yarray: Y.Array<any>;
-  private awareness: Y.Awareness;
+  private awareness: Awareness;
 
   constructor(options: CollaborativeOptions) {
     this.taskId = options.taskId;
@@ -55,7 +57,7 @@ export class CRDTDocumentManager {
     this.ydoc = new Y.Doc();
     this.ymap = this.ydoc.getMap(`task-${this.taskId}`);
     this.yarray = this.ydoc.getArray(`task-${this.taskId}-history`);
-    this.awareness = this.ydoc.awareness;
+    this.awareness = new Awareness(this.ydoc);
 
     // Set up event listeners for document changes
     this.setupDocumentListeners();
@@ -117,7 +119,7 @@ export class CRDTDocumentManager {
   private setupDocumentListeners(): void {
     this.ymap.observe((event) => {
       event.keysChanged.forEach((key) => {
-        const change = event.changes.get(key);
+        const change = event.changes.keys.get(key);
         if (change) {
           const operation: CollaborativeOperation = {
             id: `op-${Date.now()}-${Math.random().toString(36).slice(2, 9)}`,
@@ -126,7 +128,7 @@ export class CRDTDocumentManager {
             type: change.action === 'add' || change.action === 'update' ? 'update' : 'delete',
             path: [key],
             value: this.ymap.get(key),
-            oldValue: change.oldValue?.[0],
+            oldValue: change.oldValue,
             resolved: true,
           };
 
@@ -140,10 +142,10 @@ export class CRDTDocumentManager {
       event.changes.added.forEach((item) => {
         const operation: CollaborativeOperation = {
           id: `op-${Date.now()}-${Math.random().toString(36).slice(2, 9)}`,
-          userId: item.content.getUser?.() ?? this.userId,
+          userId: (item.content as any).getUser?.() ?? this.userId,
           timestamp: Date.now(),
           type: 'insert',
-          path: ['history', this.yarray.toArray().indexOf(item.content)],
+          path: ['history', this.yarray.toArray().indexOf(item.content).toString()],
           value: item.content,
           resolved: true,
         };
@@ -160,7 +162,7 @@ export class CRDTDocumentManager {
   private setupProviderListeners(): void {
     if (!this.provider) return;
 
-    this.provider.on('status', ({ status }: { status: 'connected' | 'disconnected' }) => {
+    this.provider.on('status', ({ status }: { status: 'connecting' | 'connected' | 'disconnected' }) => {
       this.connectionStatus = status === 'connected' ? 'connected' : 'disconnected';
       this.emit(status === 'connected' ? 'connected' : 'disconnected', {
         taskId: this.taskId,
@@ -175,26 +177,36 @@ export class CRDTDocumentManager {
     });
 
     // Handle awareness updates (remote users)
-    this.awareness.on('change', (changes) => {
-      changes.forEach((change) => {
-        const state = this.awareness.getLocalState();
-        if (state && change.user) {
+    this.awareness.on('change', (changes: { added: number[], updated: number[], removed: number[] }) => {
+      const allClients = [...changes.added, ...changes.updated];
+      allClients.forEach((clientId) => {
+        const state = this.awareness.getStates().get(clientId) as any;
+        if (state && state.user) {
           const user: CollaborativeUser = {
-            clientId: change.user.clientID ?? '',
-            userId: change.user.userId ?? '',
-            userName: change.user.userName ?? 'Anonymous',
-            avatarUrl: change.user.avatarUrl,
-            color: change.user.color ?? this.getRandomColor(),
-            cursor: change.user.cursor,
+            clientId: clientId.toString(),
+            userId: state.user.userId ?? '',
+            userName: state.user.userName ?? 'Anonymous',
+            avatarUrl: state.user.avatarUrl,
+            color: state.user.color ?? this.getRandomColor(),
+            cursor: state.user.cursor,
             lastActive: Date.now(),
           };
 
-          if (state.userId === this.userId) {
+          if (state.user.userId === this.userId) {
             return; // Don't track ourselves
           }
 
           this.activeUsers.set(user.clientId, user);
           this.emit('userJoined', user);
+        }
+      });
+      changes.removed.forEach((clientId) => {
+        const clientIdStr = clientId.toString();
+        const user = this.activeUsers.get(clientIdStr);
+        if (user) {
+          this.activeUsers.delete(clientIdStr);
+          // @ts-ignore
+          this.emit('userLeft', { userId: user.userId });
         }
       });
     });

@@ -281,19 +281,7 @@ function makeInstanceId(): string {
 export function useTemplateBuilder() {
   const [state, dispatch] = useReducer(reducer, initialState);
 
-  const addBlock = useCallback((def: ActionDefinition) => {
-    const block: ActionBlock = {
-      instanceId: makeInstanceId(),
-      definitionId: def.id,
-      label: def.label,
-      category: def.category,
-      icon: def.icon,
-      contractAddress: def.defaultContractAddress ?? '',
-      functionName: def.functionName,
-      inputs: def.inputs,
-      args: {},
-      isConfigured: def.inputs.filter((p) => !p.optional).length === 0,
-    };
+  const addBlock = useCallback((block: ActionBlock) => {
     dispatch({ type: 'ADD_BLOCK', block });
   }, []);
 

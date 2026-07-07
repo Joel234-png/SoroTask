@@ -3,15 +3,15 @@
 import { useCallback, useEffect, useRef } from 'react';
 import { EncryptionKeyManager } from '@/src/lib/encryption/EncryptionKeyManager';
 import { EncryptionPipeline } from '@/src/lib/encryption/EncryptionPipeline';
-import type { EncryptedPayload, KeyDerivationOptions, KeyPurpose, KeyAlgorithm } from '@/src/lib/encryption/types';
+import type { EncryptedPayload, KeyDerivationOptions, KeyPurpose, KeyAlgorithm, EncryptionKey } from '@/src/lib/encryption/types';
 import { useEncryptionStore } from '@/src/store/encryptionStore';
 
 export interface UseEncryptionKeyManagerReturn {
   status: ReturnType<typeof useEncryptionStore.getState>['status'];
   activeKeyId: string | null;
   isReady: boolean;
-  activeKey: ReturnType<typeof selectActiveKey>;
-  allActiveKeys: ReturnType<typeof selectActiveKeys>;
+  activeKey: EncryptionKey | null;
+  allActiveKeys: EncryptionKey[];
   error: string | null;
   lastRotation: ReturnType<typeof useEncryptionStore.getState>['lastRotation'];
   initialize: (opts: KeyDerivationOptions) => Promise<boolean>;

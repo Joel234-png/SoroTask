@@ -148,8 +148,8 @@ export function useMultiSigRegistration(): UseMultiSigRegistrationReturn {
         });
 
         // Stellar SDK may surface the hash as txHash or hash depending on version
-        const hash: string = (result as Record<string, unknown>).txHash as string
-          ?? (result as Record<string, unknown>).hash as string
+        const hash: string = (result as unknown as Record<string, unknown>).txHash as string
+          ?? (result as unknown as Record<string, unknown>).hash as string
           ?? '';
 
         setTxHash(hash);

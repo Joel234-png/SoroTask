@@ -7,7 +7,7 @@
  */
 
 import {
-  SorobanRpc,
+  rpc,
   TransactionBuilder,
   Networks,
   Account,
@@ -47,14 +47,14 @@ export interface SorobanWasmSimulatorConfig {
  * Provides local transaction simulation without network calls.
  */
 export class SorobanWasmSimulator {
-  private rpc: SorobanRpc.Server;
+  private rpc: rpc.Server;
   private networkPassphrase: string;
   private cache: Map<string, SimulationResult>;
   private enableCache: boolean;
   private cacheSize: number;
   
   constructor(config: SorobanWasmSimulatorConfig) {
-    this.rpc = new SorobanRpc.Server(config.rpcUrl);
+    this.rpc = new rpc.Server(config.rpcUrl);
     this.networkPassphrase = config.networkPassphrase;
     this.enableCache = config.enableCache ?? true;
     this.cacheSize = config.cacheSize ?? 100;
@@ -78,7 +78,7 @@ export class SorobanWasmSimulator {
     account: Account,
     options: SimulationOptions = {}
   ): Promise<SimulationResult> {
-    const cacheKey = this.getCacheKey(contractId, method, args, account.publicKey());
+    const cacheKey = this.getCacheKey(contractId, method, args, account.accountId());
     
     if (this.enableCache && this.cache.has(cacheKey)) {
       return this.cache.get(cacheKey)!;
@@ -99,7 +99,7 @@ export class SorobanWasmSimulator {
       // In production, this would use actual WASM simulation
       const simulation = await this.rpc.simulateTransaction(tx);
       
-      if (!SorobanRpc.Api.isSimulationSuccess(simulation)) {
+      if (!rpc.Api.isSimulationSuccess(simulation)) {
         return {
           success: false,
           error: simulation.error || 'Simulation failed',
@@ -109,11 +109,11 @@ export class SorobanWasmSimulator {
       
       const result: SimulationResult = {
         success: true,
-        result: simulation.results?.[0]?.xdr,
+        result: simulation.result?.retval,
         events: simulation.events,
-        gasUsed: simulation.cost?.cpuInstructions || 0,
-        cpuInstructions: simulation.cost?.cpuInstructions || 0,
-        memoryBytes: simulation.cost?.memoryBytes || 0,
+        gasUsed: Number((simulation as any).cost?.cpuInstructions || 0),
+        cpuInstructions: Number((simulation as any).cost?.cpuInstructions || 0),
+        memoryBytes: Number((simulation as any).cost?.memoryBytes || 0),
       };
       
       if (this.enableCache) {
@@ -144,7 +144,7 @@ export class SorobanWasmSimulator {
       const tx = transaction.build();
       const simulation = await this.rpc.simulateTransaction(tx);
       
-      if (!SorobanRpc.Api.isSimulationSuccess(simulation)) {
+      if (!rpc.Api.isSimulationSuccess(simulation)) {
         return {
           success: false,
           error: simulation.error || 'Simulation failed',
@@ -154,11 +154,11 @@ export class SorobanWasmSimulator {
       
       return {
         success: true,
-        result: simulation.results?.[0]?.xdr,
+        result: simulation.result?.retval,
         events: simulation.events,
-        gasUsed: simulation.cost?.cpuInstructions || 0,
-        cpuInstructions: simulation.cost?.cpuInstructions || 0,
-        memoryBytes: simulation.cost?.memoryBytes || 0,
+        gasUsed: Number((simulation as any).cost?.cpuInstructions || 0),
+        cpuInstructions: Number((simulation as any).cost?.cpuInstructions || 0),
+        memoryBytes: Number((simulation as any).cost?.memoryBytes || 0),
       };
     } catch (error) {
       return {
@@ -215,16 +215,16 @@ export class SorobanWasmSimulator {
       const tx = transaction.build();
       const simulation = await this.rpc.simulateTransaction(tx);
       
-      if (!SorobanRpc.Api.isSimulationSuccess(simulation)) {
+      if (!rpc.Api.isSimulationSuccess(simulation)) {
         errors.push(simulation.error || 'Transaction simulation failed');
       }
       
       // Check for high resource usage
-      if (simulation.cost?.cpuInstructions && simulation.cost.cpuInstructions > 1000000) {
+      if ((simulation as any).cost?.cpuInstructions && (simulation as any).cost.cpuInstructions > 1000000) {
         warnings.push('High CPU usage - transaction may be expensive');
       }
       
-      if (simulation.cost?.memoryBytes && simulation.cost.memoryBytes > 100000) {
+      if ((simulation as any).cost?.memoryBytes && (simulation as any).cost.memoryBytes > 100000) {
         warnings.push('High memory usage - transaction may be expensive');
       }
       
@@ -259,7 +259,7 @@ export class SorobanWasmSimulator {
    * 
    * @returns Latest ledger info
    */
-  async getLedgerInfo(): Promise<SorobanRpc.Api.LedgerEntry> {
+  async getLedgerInfo(): Promise<rpc.Api.GetLatestLedgerResponse> {
     return await this.rpc.getLatestLedger();
   }
   
@@ -302,7 +302,9 @@ export class SorobanWasmSimulator {
     if (this.cache.size >= this.cacheSize) {
       // Remove oldest entry (first in Map)
       const firstKey = this.cache.keys().next().value;
-      this.cache.delete(firstKey);
+      if (firstKey !== undefined) {
+        this.cache.delete(firstKey);
+      }
     }
     this.cache.set(key, value);
   }

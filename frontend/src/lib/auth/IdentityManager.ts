@@ -1,4 +1,4 @@
-import { User, UserRole } from '../../types/auth';
+import { User, UserRole } from '@/types/auth';
 import { AuthResult, IdentityResolutionResult } from './types';
 
 export class IdentityManager {

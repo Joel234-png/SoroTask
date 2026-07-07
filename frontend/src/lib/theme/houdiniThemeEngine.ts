@@ -19,7 +19,7 @@ export interface ThemeEngineResult {
   tokens: ThemeTokens;
 }
 
-interface CSSWithRegisterProperty extends CSS {
+interface CSSWithRegisterProperty {
   registerProperty?: (definition: {
     name: string;
     syntax?: string;
@@ -55,7 +55,7 @@ function getCssApi(): CSSWithRegisterProperty | null {
     return null;
   }
 
-  return window.CSS as CSSWithRegisterProperty;
+  return window.CSS as unknown as CSSWithRegisterProperty;
 }
 
 export function isHoudiniSupported(): boolean {

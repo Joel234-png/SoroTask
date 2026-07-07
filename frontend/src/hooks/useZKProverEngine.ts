@@ -11,6 +11,8 @@ import type {
   ZkEngineConfig,
 } from "@/src/lib/zk-proof";
 
+export type { ZkEngineConfig };
+
 const DEFAULT_CONFIG: ZkEngineConfig = {
   workerCount: 4,
   maxRetries: 3,

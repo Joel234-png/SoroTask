@@ -1,11 +1,11 @@
 "use client";
 
-import { useEffect, useRef } from "react";
+import { useEffect, useRef, Suspense } from "react";
 import { useLayoutStore } from "@/src/store/layoutStore";
 import SplitPaneLayout from "@/src/components/layout/SplitPaneLayout";
 import Board from "@/components/board/Board";
 
-export default function BoardPage() {
+function BoardPageContent() {
   const { boardScrollPositions, saveBoardScrollPosition } = useLayoutStore();
   const boardRef = useRef<HTMLDivElement>(null);
 
@@ -42,5 +42,13 @@ export default function BoardPage() {
         </div>
       </div>
     </SplitPaneLayout>
+  );
+}
+
+export default function BoardPage() {
+  return (
+    <Suspense fallback={<div className="h-full flex items-center justify-center text-neutral-400">Loading...</div>}>
+      <BoardPageContent />
+    </Suspense>
   );
 }

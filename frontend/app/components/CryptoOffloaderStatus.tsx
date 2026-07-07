@@ -1,5 +1,5 @@
 import React, { useEffect, useState } from 'react';
-import { WasmCryptoOffloader, OffloaderMetrics } from '../utils/crypto/wasmOffloader';
+import { WasmCryptoOffloader, OffloaderMetrics } from '../utils/wasmOffloader';
 import { Cpu, RefreshCw, ShieldAlert, Zap } from 'lucide-react';
 
 interface CryptoOffloaderStatusProps {

@@ -398,8 +398,15 @@ class Metrics {
       fraudRiskScore: 0,
       reconciliationBalanceDrift: 0,
       reconciliationPendingExecutions: 0,
+      slaLastCheckDurationMs: 0,
+      slaLastSlashAmount: 0,
     };
     this.feeSamples = [];
+    this.adminState = { paused: false, reason: null, changedAt: null };
+    this.shardState = { shardLabel: 'default', shardIndex: 0, ownedTasks: 0, skippedTasks: 0 };
+    this.dbShardState = { dbShardCount: 0, activeUsers: 0, pendingTasks: 0, dbShardStrategy: 'manual' };
+    this.driftState = { severity: 0, taskId: null, warning: 0, critical: 0 };
+    this.failoverState = { activeIndex: 0, healthyEndpoints: 0, totalEndpoints: 0, endpoints: [] };
     this.fraudState = {
       observations: 0,
       alertsQueued: 0,
@@ -683,6 +690,7 @@ class MetricsServer {
     this.server = null;
     this.registry = null;
     this.metrics = new Metrics();
+    this.sloMetrics = options.sloMetrics || new _SloMetrics();
     this.config = options.config || null;
     this.controlStateProvider = options.controlStateProvider || null;
     this.controlActionHandler = options.controlActionHandler || null;
@@ -1334,7 +1342,7 @@ class MetricsServer {
       try {
         this.metrics.updateFailoverState(this.failoverStateProvider());
       } catch (error) {
-        this.logger.error('Error reading failover state', { error: error.message });
+        this.logger.error('Error reading failover state', { error: error.stack });
       }
     }
     this.promFailoverActiveIndex.set(this.metrics.failoverState.activeIndex || 0);
@@ -1537,7 +1545,7 @@ class MetricsServer {
       this.logger.info(`WebSocket enabled on http://localhost:${this.port}`);
       if (this.streamHub && typeof this.streamHub.start === 'function') {
         this.streamHub.start(this.server).catch((error) => {
-          this.logger.error('Failed to start realtime stream hub', { error: error.message });
+          this.logger.error('Failed to start realtime stream hub', { error: error.stack });
         });
       }
     });
@@ -1729,7 +1737,7 @@ class MetricsServer {
     try {
       return this.p2pStateProvider();
     } catch (error) {
-      this.logger.error('Error reading P2P state', { error: error.message });
+      this.logger.error('Error reading P2P state', { error: error.stack });
       return { enabled: true, status: 'error' };
     }
   }
@@ -1740,7 +1748,7 @@ class MetricsServer {
         const next = this.failoverStateProvider();
         this.metrics.updateFailoverState(next);
       } catch (error) {
-        this.logger.error('Error reading failover state', { error: error.message });
+        this.logger.error('Error reading failover state', { error: error.stack });
       }
     }
     return this.metrics.failoverState;
@@ -1845,7 +1853,7 @@ class MetricsServer {
       res.writeHead(200, { 'Content-Type': 'application/json' });
       res.end(JSON.stringify(payload, null, 2));
     } catch (error) {
-      this.logger.error('Error reading fraud detection state', { error: error.message });
+      this.logger.error('Error reading fraud detection state', { error: error.stack });
       res.writeHead(500, { 'Content-Type': 'application/json' });
       res.end(JSON.stringify({ error: 'Failed to read fraud state' }));
     }
@@ -1863,7 +1871,7 @@ class MetricsServer {
       res.writeHead(200, { 'Content-Type': 'application/json' });
       res.end(JSON.stringify(payload, null, 2));
     } catch (error) {
-      this.logger.error('Error reading reconciliation state', { error: error.message });
+      this.logger.error('Error reading reconciliation state', { error: error.stack });
       res.writeHead(500, { 'Content-Type': 'application/json' });
       res.end(JSON.stringify({ error: 'Failed to read reconciliation state' }));
     }
@@ -1876,7 +1884,7 @@ class MetricsServer {
       res.writeHead(200, { 'Content-Type': this.register.contentType });
       res.end(metrics);
     } catch (error) {
-      this.logger.error('Error generating Prometheus metrics', { error: error.message });
+      this.logger.error('Error generating Prometheus metrics', { error: error.stack });
       res.writeHead(500, { 'Content-Type': 'text/plain' });
       res.end('Internal Server Error');
     }

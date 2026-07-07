@@ -125,8 +125,12 @@ export function getTranslation(
     if (value && typeof value === 'object' && key in value) {
       value = value[key];
     } else {
-      // Fallback to English if key not found
-      value = getTranslation(DEFAULT_LOCALE, keyPath, variables);
+      // Fallback to English if key not found and we are not already checking English
+      if (locale !== DEFAULT_LOCALE) {
+        value = getTranslation(DEFAULT_LOCALE, keyPath, variables);
+      } else {
+        value = undefined;
+      }
       break;
     }
   }

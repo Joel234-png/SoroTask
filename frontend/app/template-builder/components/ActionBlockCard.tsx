@@ -11,6 +11,7 @@ interface ActionBlockProps {
   onContractChange: (instanceId: string, contractAddress: string) => void;
   onDragStart: (index: number) => void;
   onDrop: (toIndex: number) => void;
+  onAddCondition?: () => void;
 }
 
 const CATEGORY_COLORS: Record<string, string> = {

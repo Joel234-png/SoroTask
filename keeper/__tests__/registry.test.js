@@ -3,6 +3,7 @@ const { xdr } = require('@stellar/stellar-sdk');
 
 // Mock fs so we don't touch the real filesystem
 jest.mock('fs');
+fs.promises = { writeFile: jest.fn().mockResolvedValue(), rename: jest.fn().mockResolvedValue() };
 
 const TaskRegistry = require('../src/registry');
 
@@ -60,7 +61,7 @@ beforeEach(() => {
   jest.clearAllMocks();
   fs.existsSync.mockReturnValue(false);
   fs.mkdirSync.mockReturnValue(undefined);
-  fs.writeFileSync.mockReturnValue(undefined);
+  fs.promises.writeFile.mockReturnValue(undefined);
 });
 
 describe('TaskRegistry', () => {
@@ -155,8 +156,8 @@ describe('TaskRegistry', () => {
 
     await registry.init();
 
-    expect(fs.writeFileSync).toHaveBeenCalled();
-    const writtenData = JSON.parse(fs.writeFileSync.mock.calls[0][1]);
+    expect(fs.promises.writeFile).toHaveBeenCalled();
+    const writtenData = JSON.parse(fs.promises.writeFile.mock.calls[0][1]);
     expect(writtenData.taskIds).toEqual([5]);
     expect(writtenData.lastSeenLedger).toBe(900);
   });
@@ -166,6 +167,7 @@ describe('TaskRegistry', () => {
     fs.readFileSync.mockReturnValue(JSON.stringify({
       taskIds: [10, 20],
       lastSeenLedger: 500,
+      version: 1,
     }));
 
     const server = mockServer([]);
@@ -213,7 +215,7 @@ describe('TaskRegistry', () => {
     fs.readFileSync.mockReturnValue(JSON.stringify({
       taskIds: [99],
       tasks: { 99: { id: 99, status: 'active' } },
-      lastSeenLedger: 1,
+      lastSeenLedger: 1, version: 2,
     }));
 
     const server = mockServer([]);
@@ -325,14 +327,14 @@ describe('TaskRegistry', () => {
 
     const registry = new TaskRegistry(mockServer([]), 'CABC123', { logger });
     expect(logger.warn).toHaveBeenCalledWith(
-      'Could not load persisted tasks',
+      'Snapshot parse error',
       expect.objectContaining({ error: expect.any(String) }),
     );
 
-    fs.writeFileSync.mockImplementationOnce(() => {
+    fs.promises.writeFile.mockImplementationOnce(() => {
       throw new Error('disk full');
     });
-    registry._saveToDisk();
+    await registry._saveToDisk();
     expect(logger.warn).toHaveBeenCalledWith(
       'Could not persist tasks',
       expect.objectContaining({ error: 'disk full' }),

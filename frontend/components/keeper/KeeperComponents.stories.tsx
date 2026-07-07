@@ -10,10 +10,10 @@ import {
   KeeperHealthScore,
   KeeperStatusBadge,
   KeeperUptimeDisplay,
-} from '../KeeperHealthIndicator';
-import { KeeperTable } from '../KeeperTable';
-import { KeeperStatsCard, KeeperQuickStats } from '../KeeperStatsCard';
-import { KeeperDetailModal } from '../KeeperDetailModal';
+} from './KeeperHealthIndicator';
+import { KeeperTable } from './KeeperTable';
+import { KeeperStatsCard, KeeperQuickStats } from './KeeperStatsCard';
+import { KeeperDetailModal } from './KeeperDetailModal';
 import { Keeper, KeeperStatistics } from '@/types/keeper';
 
 // Mock data

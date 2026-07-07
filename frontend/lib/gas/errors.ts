@@ -7,6 +7,7 @@
 import {
   GasFeeError,
   GasFeeErrorType,
+  GasFeeDataPoint,
 } from '@/types/gas';
 
 /**
@@ -20,6 +21,7 @@ interface ErrorContext {
   responseData?: unknown;
   taskId?: string;
   retryCount?: number;
+  [key: string]: unknown;
 }
 
 /**
@@ -160,8 +162,8 @@ export function logGasFeeError(error: GasFeeError, context?: ErrorContext): void
   }
 
   // In production, send to error tracking service (Sentry, etc.)
-  if (typeof window !== 'undefined' && window.__SENTRY__) {
-    window.__SENTRY__.captureException(error.originalError || new Error(error.message), {
+  if (typeof window !== 'undefined' && (window as any).__SENTRY__) {
+    (window as any).__SENTRY__.captureException(error.originalError || new Error(error.message), {
       tags: {
         gas_fee_error: error.type,
       },

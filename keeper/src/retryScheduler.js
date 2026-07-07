@@ -111,14 +111,19 @@ class RetryScheduler {
     }
   }
 
+  setSloMetrics(sloMetrics) {
+    this.sloMetrics = sloMetrics;
+  }
+
   /**
-   * Schedule a retry for a failed task
-   *
-   * @param {Object} taskInfo - Task information
-   * @param {number} taskInfo.taskId - Task ID
-   * @param {Error} taskInfo.error - Error that caused failure
-   * @param {number} taskInfo.currentAttempt - Current attempt number
-   * @param {Object} taskInfo.taskConfig - Task configuration
+   * Schedule a task for retry
+   * 
+   * @param {Object} options
+   * @param {string} options.taskId
+   * @param {Error} options.error
+   * @param {number} options.currentAttempt
+   * @param {Object} options.taskConfig
+   * @returns {Promise<Object>} Result indicating if scheduled and when
    */
   async scheduleRetry({ taskId, error, currentAttempt = 0, taskConfig }) {
     if (!this.initialized) {

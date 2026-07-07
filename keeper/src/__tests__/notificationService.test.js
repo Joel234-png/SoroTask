@@ -185,6 +185,7 @@ describe('NotificationService', () => {
   
   describe('getInAppNotifications', () => {
     beforeEach(async () => {
+      await new Promise(r => setTimeout(r, 10));
       await service.sendInApp({
         type: NotificationType.TASK_FAILED,
         title: 'Failed Task',
@@ -192,6 +193,7 @@ describe('NotificationService', () => {
         recipient: 'user@example.com',
       }, 'notif_1');
       
+      await new Promise(r => setTimeout(r, 10));
       await service.sendInApp({
         type: NotificationType.GAS_LOW,
         title: 'Low Gas',
@@ -199,6 +201,7 @@ describe('NotificationService', () => {
         recipient: 'user@example.com',
       }, 'notif_2');
       
+      await new Promise(r => setTimeout(r, 10));
       await service.sendInApp({
         type: NotificationType.TASK_FAILED,
         title: 'Another Failed',
@@ -240,6 +243,7 @@ describe('NotificationService', () => {
   
   describe('markAsRead', () => {
     it('should mark notification as read', async () => {
+      await new Promise(r => setTimeout(r, 10));
       await service.sendInApp({
         type: NotificationType.TASK_FAILED,
         title: 'Test',

@@ -8,7 +8,7 @@ export function createZodFieldValidator<T extends z.ZodRawShape>(
   schema: z.ZodObject<T>,
   fieldName: keyof T & string
 ): ValidationRule {
-  const fieldSchema = schema.shape[fieldName];
+  const fieldSchema = schema.shape[fieldName] as unknown as z.ZodTypeAny;
 
   return {
     validate: (value: unknown) => {
@@ -64,7 +64,7 @@ export function validateFieldWithZod<T extends z.ZodRawShape>(
   fieldName: keyof T & string,
   value: unknown
 ): string[] {
-  const fieldSchema = schema.shape[fieldName];
+  const fieldSchema = schema.shape[fieldName] as unknown as z.ZodTypeAny;
   const result = fieldSchema.safeParse(value);
 
   if (result.success) {

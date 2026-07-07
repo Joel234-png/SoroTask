@@ -2,7 +2,7 @@
 
 import { useState, useEffect, useCallback } from 'react';
 import { WebAuthnService } from '@/src/lib/auth/webauthn';
-import { captureSentryException } from '@/src/lib/errors/tracking';
+import { captureSentryException } from '@/src/lib/errors';
 
 const STORAGE_KEY = 'sorotask_webauthn_credentials';
 

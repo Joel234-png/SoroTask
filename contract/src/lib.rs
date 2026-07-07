@@ -2041,7 +2041,7 @@ impl SoroTaskContract {
         use events::{ExecutionStep, StepResult};
 
         let mut trace_steps: Vec<events::ExecutionStepRecord> = Vec::new(env);
-        let mut final_outcome: ExecutionOutcome = ExecutionOutcome::Skipped;
+        let final_outcome: ExecutionOutcome;
 
         // ── 1. Auth validation ────────────────────────────────────────────
         if !skip_auth {

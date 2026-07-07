@@ -1,4 +1,4 @@
-const { validateTaskPayload, LIMITS } = require("../src/utils/taskValidator");
+const { validateTaskPayload, LIMITS } = require("../src/taskValidator");
 
 describe("Task Payload Validation Hardening", () => {
   const validTarget =

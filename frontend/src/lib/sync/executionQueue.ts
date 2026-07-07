@@ -249,5 +249,5 @@ export function createExecutionQueue(
   handlers: ExecutionQueueHandler,
   config?: Omit<SyncConfig, "rpcEndpoint">,
 ): ExecutionQueue {
-  return new ExecutionQueue(handlers, config ?? {});
+  return new ExecutionQueue(handlers, (config ?? {}) as any);
 }
