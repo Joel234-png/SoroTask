@@ -1,6 +1,11 @@
 require('@testing-library/jest-dom')
 const React = require('react')
 
+// jsdom doesn't expose structuredClone, which fake-indexeddb relies on.
+if (typeof global.structuredClone !== 'function') {
+  global.structuredClone = (value) => JSON.parse(JSON.stringify(value))
+}
+
 if (typeof global.fetch !== 'function') {
   global.fetch = jest.fn(() =>
     Promise.resolve({
@@ -46,6 +51,9 @@ jest.mock('@sentry/react', () => ({
   ErrorBoundary: ({ children }) => children,
   withProfiler: (Component) => Component,
 }))
+
+// Mock scrollIntoView for jsdom (used by ZKProofLogStream)
+Element.prototype.scrollIntoView = jest.fn()
 
 // Suppress known Tiptap duplicate-extension warning in tests
 const originalWarn = console.warn.bind(console)

@@ -31,7 +31,7 @@ export function addSentryBreadcrumb(
     message,
     level,
     data,
-    timestamp: new Date(),
+    timestamp: Date.now() / 1000,
   });
 }
 

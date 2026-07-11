@@ -2,11 +2,13 @@
 
 import React, { useState } from 'react';
 import { ActionBlockCard } from './ActionBlockCard';
-import { useTemplateBuilder } from './useTemplateBuilder';
-import { PREDEFINED_ACTIONS } from './actions';
+import { useTemplateBuilder } from '../useTemplateBuilder';
+import { PREDEFINED_ACTIONS } from '../actions';
 import {
   ActionDefinition,
   ActionBlock,
+} from '../types';
+import {
   WorkflowStage,
   WorkflowCondition,
   WorkflowTemplate,
@@ -14,7 +16,7 @@ import {
   reorderInStage,
   createStage,
   moveBlockToStage,
-} from './workflow';
+} from '../workflow';
 import { useId } from 'react';
 
 export function WorkflowBuilder() {
@@ -67,14 +69,14 @@ export function WorkflowBuilder() {
   function handleAddStage() {
     const name = prompt('Stage name');
     if (!name) return;
-    setStages((prev) => createStage({ stages: prev, blocks, createdAt: new Date(), id: 'wf', name: '' } as WorkflowTemplate, name, activeStageId).stages);
+    setStages((prev) => createStage({ stages: prev, blocks, createdAt: new Date(), id: 'wf', name: '', defaultStageId: prev[0]?.id || '' } as unknown as WorkflowTemplate, name, activeStageId).stages);
   }
 
   function handleStageDrop(fromStageId: string, toStageId: string, instanceId: string) {
     if (fromStageId === toStageId) return;
     setStages((prev) =>
       moveBlockToStage(
-        { stages: prev, blocks, createdAt: new Date(), id: 'wf', name: '' } as WorkflowTemplate,
+        { stages: prev, blocks, createdAt: new Date(), id: 'wf', name: '', defaultStageId: prev[0]?.id || '' } as unknown as WorkflowTemplate,
         instanceId,
         fromStageId,
         toStageId,
@@ -85,7 +87,7 @@ export function WorkflowBuilder() {
 
   function handleReorder(stageId: string, from: number, to: number) {
     setStages((prev) =>
-      reorderInStage({ stages: prev, blocks, createdAt: new Date(), id: 'wf', name: '' } as WorkflowTemplate, stageId, from, to).stages
+      reorderInStage({ stages: prev, blocks, createdAt: new Date(), id: 'wf', name: '', defaultStageId: prev[0]?.id || '' } as unknown as WorkflowTemplate, stageId, from, to).stages
     );
   }
 

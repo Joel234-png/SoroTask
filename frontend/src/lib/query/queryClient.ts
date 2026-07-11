@@ -1,5 +1,5 @@
-import { QueryClient, type DefaultOptions } from "@tanstack/react-query";
-import { captureSentryException } from "@/src/lib/errors/tracking";
+import { QueryClient, QueryCache, MutationCache, type DefaultOptions } from "@tanstack/react-query";
+import { captureSentryException } from "@/src/lib/errors";
 
 // Default query/mutation options. Tuned for an on-chain app where:
 // - Data does not change every second (5min staleTime is fine).
@@ -30,7 +30,7 @@ export const DEFAULT_QUERY_OPTIONS: DefaultOptions = {
 export function createQueryClient(): QueryClient {
   return new QueryClient({
     defaultOptions: DEFAULT_QUERY_OPTIONS,
-    queryCache: {
+    queryCache: new QueryCache({
       onError: (error, query) => {
         // Report query errors to Sentry
         const err = error instanceof Error ? error : new Error(String(error));
@@ -45,8 +45,8 @@ export function createQueryClient(): QueryClient {
           },
         });
       },
-    },
-    mutationCache: {
+    }),
+    mutationCache: new MutationCache({
       onError: (error, variables, _context, mutation) => {
         // Report mutation errors to Sentry
         const err = error instanceof Error ? error : new Error(String(error));
@@ -62,6 +62,6 @@ export function createQueryClient(): QueryClient {
           },
         });
       },
-    },
+    }),
   });
 }

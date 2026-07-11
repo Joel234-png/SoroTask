@@ -40,14 +40,15 @@ const customConfig = {
     '<rootDir>/components/**/*.{spec,test}.{js,jsx,ts,tsx}',
     '<rootDir>/src/**/__tests__/**/*.{js,jsx,ts,tsx}',
     '<rootDir>/src/**/*.{spec,test}.{js,jsx,ts,tsx}',
-    '<rootDir>/components/**/__tests__/**/*.{js,jsx,ts,tsx}',
-    '<rootDir>/components/**/*.{spec,test}.{js,jsx,ts,tsx}',
+    '<rootDir>/__tests__/**/*.{js,jsx,ts,tsx}',
+    '<rootDir>/__tests__/**/*.{spec,test}.{js,jsx,ts,tsx}',
     '<rootDir>/lib/**/__tests__/**/*.{js,jsx,ts,tsx}',
     '<rootDir>/lib/**/*.{spec,test}.{js,jsx,ts,tsx}',
   ],
   moduleNameMapper: {
     '^@/(.*)$': '<rootDir>/$1',
   },
+  transformIgnorePatterns: ['/node_modules/(?!(@noble|@stellar)/)'],
 };
 
 module.exports = createJestConfig(customConfig);

@@ -23,7 +23,7 @@ export function useSWRQuery<TData>(
 ): SWRQueryResult<TData> {
   const cache = getSWRCache();
 
-  return useQuery<TData>({
+  const queryResult = useQuery<TData>({
     queryKey,
     queryFn: async ({ signal }) => {
       const result = await cache.fetch(queryKey, fetchFn, operation, signal);
@@ -32,6 +32,17 @@ export function useSWRQuery<TData>(
     staleTime: 0,
     ...options,
   });
+
+  return {
+    data: queryResult.data,
+    isLoading: queryResult.isLoading,
+    isError: queryResult.isError,
+    error: queryResult.error,
+    isStale: queryResult.isStale,
+    isFallback: false,
+    attempt: queryResult.failureCount + 1,
+    refetch: queryResult.refetch as any,
+  };
 }
 
 export function useSWRInfiniteQuery<TData, TPageParam = unknown>(

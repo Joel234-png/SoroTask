@@ -151,7 +151,7 @@ export default function Calendar({
                   day.getMonth() === currentDate.getMonth();
                 const isTodayDate = isToday(day);
                 const isSelectedDate =
-                  selectedDate && isSameDay(selectedDate, day);
+                  !!(selectedDate && isSameDay(selectedDate, day));
                 const isExpanded = expandedDate === dateKey;
 
                 return (

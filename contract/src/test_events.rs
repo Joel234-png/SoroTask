@@ -1,6 +1,6 @@
 #![cfg(test)]
 
-use crate::events::{EventLogger, StateChangeType};
+use crate::events::{EventLogger, ExecutionStep, StateChangeType, StepResult};
 use soroban_sdk::{testutils::Address as _, Address, Env, Symbol, Val, Vec};
 
 #[test]
@@ -46,6 +46,31 @@ fn test_log_execution() {
         error_code,
         gas_used,
         result_data,
+    );
+}
+
+#[test]
+fn test_log_execution_step() {
+    let env = Env::default();
+    let keeper = Address::generate(&env);
+    let task_id = 1u64;
+
+    EventLogger::log_execution_step(
+        &env,
+        task_id,
+        &keeper,
+        ExecutionStep::ValidateAuth,
+        StepResult::Passed,
+        0,
+    );
+
+    EventLogger::log_execution_step(
+        &env,
+        task_id,
+        &keeper,
+        ExecutionStep::CheckBalance,
+        StepResult::Failed,
+        3,
     );
 }
 

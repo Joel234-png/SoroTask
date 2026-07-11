@@ -54,6 +54,15 @@ const typeDefs = gql`
   }
 
   """
+  Aggregate performance stats for a single Keeper, derived from KeeperPaid events.
+  """
+  type KeeperStat {
+    address: String!
+    tasksExecuted: Int!
+    bountiesEarnedXlm: Float!
+  }
+
+  """
   Represents a reconciliation log.
   Restricted to Operators and Admins.
   """
@@ -85,6 +94,11 @@ const typeDefs = gql`
     Retrieve events. Optionally filter by task_id.
     """
     events(task_id: Int, limit: Int, offset: Int): [Event!]!
+
+    """
+    Keeper leaderboard, ranked by tasks executed. Accessible by anyone.
+    """
+    keeperStats(limit: Int): [KeeperStat!]!
 
     """
     Retrieve reconciliation logs. Restricted to OPERATOR.

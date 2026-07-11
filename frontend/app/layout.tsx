@@ -3,6 +3,7 @@ import "./globals.css";
 import { CommandPalette } from "@/components/CommandPalette";
 import { AppProviders } from "@/app/components/AppProviders";
 import { AIAssistantProvider } from "@/components/AIAssistant";
+import { ClientInit } from "./ClientInit";
 
 export const metadata: Metadata = {
   title: "SoroTask Frontend Performance Monitoring",
@@ -32,9 +33,7 @@ export default function RootLayout({
         {/* eslint-disable-next-line @next/next/no-sync-scripts */}
         <script dangerouslySetInnerHTML={{ __html: themeScript }} />
       </head>
-      <body
-        className={`${geistSans.variable} ${geistMono.variable} antialiased`}
-      >
+      <body className="antialiased">
         <AIAssistantProvider>
           <AppProviders>
             <CommandPalette />
@@ -46,34 +45,4 @@ export default function RootLayout({
       </body>
     </html>
   );
-}
-
-/**
- * Client-side initialization for Sentry and error tracking
- * Must be a separate client component to use useEffect
- */
-"use client";
-
-import { useEffect } from "react";
-import * as Sentry from "@/src/lib/errors/sentry";
-import { instrumentFetch } from "@/src/lib/errors/fetchTracker";
-
-function ClientInit() {
-  useEffect(() => {
-    // Instrument fetch API for tracking
-    instrumentFetch();
-
-    // Initialize Sentry if available (file-based config handles setup)
-    if (process.env.NEXT_PUBLIC_SENTRY_DSN) {
-      console.log("Sentry error tracking enabled");
-    }
-
-    // Track app initialization
-    Sentry.addSentryBreadcrumb("lifecycle", "Application initialized", {
-      userAgent: navigator.userAgent,
-      language: navigator.language,
-    });
-  }, []);
-
-  return null;
 }

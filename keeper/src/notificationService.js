@@ -57,13 +57,13 @@ class NotificationServiceConfig {
     
     // Webhook configuration
     this.webhookEnabled = options.webhookEnabled ?? process.env.NOTIFICATION_WEBHOOKS_ENABLED === 'true';
-    this.webhookEndpoints = options.webhookEndpoints || this.parseWebhookEndpoints(process.env.NOTIFICATION_WEBHOOK_ENDPOINTS);
+    this.webhookEndpoints = typeof options.webhookEndpoints === "string" ? this.parseWebhookEndpoints(options.webhookEndpoints) : (options.webhookEndpoints || this.parseWebhookEndpoints(process.env.NOTIFICATION_WEBHOOK_ENDPOINTS));
     this.webhookTimeout = parseInt(options.webhookTimeout || process.env.WEBHOOK_TIMEOUT || '10000', 10);
     this.webhookRetryAttempts = parseInt(options.webhookRetryAttempts || process.env.WEBHOOK_RETRY_ATTEMPTS || '3', 10);
     
     // In-app configuration
     this.inAppEnabled = options.inAppEnabled ?? true;
-    this.inAppRetentionDays = parseInt(options.inAppRetentionDays || process.env.IN_APP_RETENTION_DAYS || '30', 10);
+    this.inAppRetentionDays = options.inAppRetentionDays !== undefined ? parseInt(options.inAppRetentionDays, 10) : parseInt(process.env.IN_APP_RETENTION_DAYS || '30', 10);
     
     // Rate limiting
     this.rateLimitPerMinute = parseInt(options.rateLimitPerMinute || process.env.NOTIFICATION_RATE_LIMIT || '60', 10);
@@ -453,7 +453,7 @@ class NotificationService {
     }
     
     // Add current request to tracker
-    this.rateLimitTracker.set(now, true);
+    this.rateLimitTracker.set(now + '_' + Math.random(), true);
     return true;
   }
   

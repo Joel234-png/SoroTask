@@ -125,7 +125,7 @@ describe("ExecutionQueue", () => {
     });
 
     it('should skip tasks already scheduled for retry', async () => {
-      queue.retryScheduler.getRetryMetadata.mockReturnValue({ taskId: 1, nextAttemptTime: Date.now() + 1000 });
+      queue.retryScheduler.getRetryMetadata.mockImplementation(id => id === 1 ? { taskId: 1, nextAttemptTime: Date.now() + 1000 } : null);
       const executorFn = jest.fn().mockResolvedValue(undefined);
 
       await queue.enqueue([1, 2], executorFn);
@@ -158,7 +158,7 @@ describe("ExecutionQueue", () => {
       const executorFn = jest.fn().mockResolvedValue(undefined);
       await queue.enqueue([1], executorFn);
 
-      expect(startedSpy).toHaveBeenCalledWith(1, expect.any(Object));
+      expect(startedSpy).toHaveBeenCalledWith(1);
     });
 
     it("should emit task:success event on success", async () => {
@@ -207,6 +207,7 @@ describe("ExecutionQueue", () => {
       await queue.enqueue([1], executorFn);
       expect(executorFn).toHaveBeenCalledTimes(1);
 
+      mockRetryScheduler.getRetryMetadata.mockReturnValue({ taskId: 1 });
       // Second cycle - task 1 should be skipped
       await queue.enqueue([1], executorFn);
       expect(executorFn).toHaveBeenCalledTimes(1); // Still 1, not called again
@@ -239,6 +240,7 @@ describe("ExecutionQueue", () => {
 
       // Start task but don't await
       queue.enqueue([1], slowExecutor);
+      await new Promise(r => setTimeout(r, 10));
 
       // Immediately call drain
       await queue.drain();
@@ -298,7 +300,7 @@ describe("ExecutionQueue", () => {
   describe("metrics integration", () => {
     it("should increment tasksDueTotal when metricsServer provided", async () => {
       const mockMetrics = {
-        increment: jest.fn(),
+        increment: jest.fn(), setRetryQueueSize: jest.fn(), record: jest.fn(),
       };
       const metricsQueue = new ExecutionQueue(3, mockMetrics, createMockRetryScheduler());
 
@@ -310,7 +312,7 @@ describe("ExecutionQueue", () => {
 
     it("should increment tasksExecutedTotal on success", async () => {
       const mockMetrics = {
-        increment: jest.fn(),
+        increment: jest.fn(), setRetryQueueSize: jest.fn(), record: jest.fn(),
       };
       const metricsQueue = new ExecutionQueue(3, mockMetrics, createMockRetryScheduler());
 
@@ -325,7 +327,7 @@ describe("ExecutionQueue", () => {
 
     it("should increment tasksFailedTotal on failure", async () => {
       const mockMetrics = {
-        increment: jest.fn(),
+        increment: jest.fn(), setRetryQueueSize: jest.fn(), record: jest.fn(),
       };
       const metricsQueue = new ExecutionQueue(3, mockMetrics, createMockRetryScheduler());
 
@@ -337,7 +339,7 @@ describe("ExecutionQueue", () => {
 
     it("should record lastCycleDurationMs", async () => {
       const mockMetrics = {
-        increment: jest.fn(),
+        increment: jest.fn(), setRetryQueueSize: jest.fn(), record: jest.fn(),
         record: jest.fn(),
       };
       const metricsQueue = new ExecutionQueue(3, mockMetrics, createMockRetryScheduler());

@@ -1,5 +1,5 @@
 import {
-  SorobanRpc,
+  rpc,
   TransactionBuilder,
   Networks,
   Account,
@@ -10,17 +10,17 @@ import { signTransaction } from "@stellar/freighter-api";
 import { EXPECTED_NETWORK_PASSPHRASE } from "./wallet";
 
 export class SorobanService {
-  private rpc: SorobanRpc.Server;
+  private rpcServer: rpc.Server;
 
   constructor(rpcUrl: string = "https://rpc-futurenet.stellar.org") {
-    this.rpc = new SorobanRpc.Server(rpcUrl);
+    this.rpcServer = new rpc.Server(rpcUrl);
   }
 
   /**
    * Load the real account sequence from the network
    */
   async getAccount(publicKey: string): Promise<Account> {
-    const accountResponse = await this.rpc.getAccount(publicKey);
+    const accountResponse = await this.rpcServer.getAccount(publicKey);
     return new Account(publicKey, accountResponse.sequenceNumber());
   }
 
@@ -31,14 +31,14 @@ export class SorobanService {
     tx: any,
     networkPassphrase = EXPECTED_NETWORK_PASSPHRASE
   ): Promise<any> {
-    const simulation = await this.rpc.simulateTransaction(tx);
-    if (!SorobanRpc.Api.isSimulationSuccess(simulation)) {
+    const simulation = await this.rpcServer.simulateTransaction(tx);
+    if (!rpc.Api.isSimulationSuccess(simulation)) {
       throw new Error(
         "Simulation failed: " +
-          (simulation.errorResultXdr || "Unknown simulation error")
+          ((simulation as any).errorResultXdr || (simulation as any).error || "Unknown simulation error")
       );
     }
-    return SorobanRpc.assembleTransaction(tx, networkPassphrase, simulation).build();
+    return rpc.assembleTransaction(tx, simulation).build();
   }
 
   /**
@@ -58,7 +58,7 @@ export class SorobanService {
     args?: xdr.ScVal[];
     timeoutMs?: number;
     networkPassphrase?: string;
-  }): Promise<SorobanRpc.Api.GetSuccessfulTransactionResponse> {
+  }): Promise<rpc.Api.GetSuccessfulTransactionResponse> {
     // 1. Load real account sequence
     const account = await this.getAccount(publicKey);
     
@@ -88,21 +88,21 @@ export class SorobanService {
     const signedTx = TransactionBuilder.fromXDR(finalXdrStr, networkPassphrase);
 
     // 5. Submit
-    const sendResponse = await this.rpc.sendTransaction(signedTx);
+    const sendResponse = await this.rpcServer.sendTransaction(signedTx);
     if (sendResponse.status === "ERROR") {
-      throw new Error(`Transaction submission failed: ${sendResponse.errorResultXdr}`);
+      throw new Error(`Transaction submission failed: ${(sendResponse as any).errorResultXdr || (sendResponse as any).errorResult}`);
     }
 
     // 6. Poll with timeout handling
     const startTime = Date.now();
     while (Date.now() - startTime < timeoutMs) {
-      const statusResponse = await this.rpc.getTransaction(sendResponse.hash);
+      const statusResponse = await this.rpcServer.getTransaction(sendResponse.hash);
       
-      if (statusResponse.status === SorobanRpc.Api.GetTransactionStatus.SUCCESS) {
-        return statusResponse as SorobanRpc.Api.GetSuccessfulTransactionResponse;
+      if (statusResponse.status === rpc.Api.GetTransactionStatus.SUCCESS) {
+        return statusResponse as rpc.Api.GetSuccessfulTransactionResponse;
       }
       
-      if (statusResponse.status === SorobanRpc.Api.GetTransactionStatus.FAILED) {
+      if (statusResponse.status === rpc.Api.GetTransactionStatus.FAILED) {
         throw new Error(
           `Transaction failed on-chain: ${statusResponse.resultXdr}`
         );

@@ -11,6 +11,7 @@ import {
   TaskExecutionEvent,
   ExecutionLogEntry,
   ExecutionStatus,
+  ExecutionTrace,
 } from '@/src/types/taskExecution';
 
 // ── Types ─────────────────────────────────────────────────────────────────────
@@ -18,6 +19,7 @@ import {
 export interface ExecutionStore {
   // State
   executions: Record<string, TaskExecutionState>;
+  executionTraces: Record<string, ExecutionTrace>;
   streamConnected: boolean;
   lastEventId?: string;
 
@@ -36,6 +38,8 @@ export interface ExecutionStore {
   setStreamConnected: (connected: boolean) => void;
   getExecutionState: (taskId: string) => TaskExecutionState | null;
   getLogs: (taskId: string) => ExecutionLogEntry[];
+  setExecutionTrace: (taskId: string, trace: ExecutionTrace) => void;
+  getExecutionTrace: (taskId: string) => ExecutionTrace | null;
   clearExecution: (taskId: string) => void;
   clearAllExecutions: () => void;
 }
@@ -52,6 +56,7 @@ const createInitialExecutionState = (taskId: string): TaskExecutionState => ({
 
 export const useExecutionStore = create<ExecutionStore>((set, get) => ({
   executions: {},
+  executionTraces: {},
   streamConnected: false,
 
   initializeExecution(taskId) {
@@ -197,10 +202,25 @@ export const useExecutionStore = create<ExecutionStore>((set, get) => ({
     return state.executions[taskId]?.logs || [];
   },
 
+  setExecutionTrace(taskId, trace) {
+    set((state) => ({
+      executionTraces: {
+        ...state.executionTraces,
+        [taskId]: trace,
+      },
+    }));
+  },
+
+  getExecutionTrace(taskId) {
+    const state = get();
+    return state.executionTraces[taskId] || null;
+  },
+
   clearExecution(taskId) {
     set((state) => {
       const { [taskId]: _, ...rest } = state.executions;
-      return { executions: rest };
+      const { [taskId]: __, ...restTraces } = state.executionTraces;
+      return { executions: rest, executionTraces: restTraces };
     });
   },
 

@@ -21,7 +21,7 @@ if (SENTRY_DSN) {
     ],
 
     beforeSend(event, hint) {
-      return filterSensitiveData(event);
+      return filterSensitiveData(event as any) as any;
     },
 
     ignoreErrors: [
@@ -36,7 +36,7 @@ if (SENTRY_DSN) {
   });
 }
 
-function filterSensitiveData(event: Sentry.Event): Sentry.Event {
+function filterSensitiveData(event: any): any {
   const sensitiveKeys = [
     "password",
     "token",

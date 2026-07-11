@@ -128,7 +128,7 @@ const DEFAULT_ROLES: Role[] = [
   },
 ];
 
-export function RoleBasedAccessControl({
+export default function RoleBasedAccessControl({
   workspace,
   onUpdateWorkspace,
   onAddMember,

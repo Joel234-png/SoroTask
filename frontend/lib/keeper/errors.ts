@@ -21,6 +21,7 @@ interface ErrorContext {
   responseData?: unknown;
   keeperId?: string;
   retryCount?: number;
+  [key: string]: unknown;
 }
 
 /**
@@ -156,8 +157,8 @@ export function logKeeperError(error: KeeperError, context?: ErrorContext): void
   }
 
   // In production, send to error tracking service (Sentry, etc.)
-  if (typeof window !== 'undefined' && window.__SENTRY__) {
-    window.__SENTRY__.captureException(error.originalError || new Error(error.message), {
+  if (typeof window !== 'undefined' && (window as any).__SENTRY__) {
+    (window as any).__SENTRY__.captureException(error.originalError || new Error(error.message), {
       tags: {
         keeper_error: error.type,
       },
