@@ -15,8 +15,8 @@
 pub mod events;
 
 use soroban_sdk::{
-    contract, contracterror, contractimpl, contracttype, panic_with_error, Address, Bytes, BytesN,
-    Env, IntoVal, Symbol, TryIntoVal, Val, Vec,
+    contract, contracterror, contractimpl, contracttype, panic_with_error, xdr::ToXdr, Address,
+    Bytes, BytesN, Env, IntoVal, Symbol, TryIntoVal, Val, Vec,
 };
 
 #[contracterror]
@@ -64,6 +64,7 @@ pub enum Error {
     InvalidInsurancePolicy = 33,
     TaskNotFound = 36,
     InvalidUpgradeVersion = 37,
+    DuplicateTask = 38,
     BountyBelowMinimum = 38,
     InvalidBounty = 39,
 }
@@ -621,6 +622,9 @@ pub enum DataKey {
     TaskDependencies(u64),
     TaskStatus(u64),
     DependencyRules(u64),
+    /// Existence marker keyed by `task_fingerprint(creator, target, function, args, interval)`,
+    /// used to reject duplicate registrations. See `register`/`cancel_task`.
+    TaskFingerprint(BytesN<32>),
     Portfolio(u64),
     PortfolioTasks(u64),
     PortfolioCounter,
@@ -682,6 +686,29 @@ fn enter_security_guard(env: &Env) {
 fn exit_security_guard(env: &Env) {
     let key = DataKey::ReentrancyLock;
     env.storage().temporary().remove(&key);
+}
+
+/// Deterministic fingerprint for a task's identifying parameters, scoped per
+/// creator: the same creator registering the same (target, function, args,
+/// interval) twice is treated as spam; two different creators independently
+/// scheduling the same call is not.
+fn task_fingerprint(
+    env: &Env,
+    creator: &Address,
+    target: &Address,
+    function: &Symbol,
+    args: &Vec<Val>,
+    interval: u64,
+) -> BytesN<32> {
+    let tuple = (
+        creator.clone(),
+        target.clone(),
+        function.clone(),
+        args.clone(),
+        interval,
+    );
+    let bytes: Bytes = tuple.to_xdr(env);
+    env.crypto().sha256(&bytes).to_bytes()
 }
 
 fn get_active_task_ids(env: &Env) -> Vec<u64> {
@@ -1106,6 +1133,22 @@ impl SoroTaskContract {
         if let Err(e) = Self::validate_args(&config.args) {
             panic_with_error!(&env, e);
         }
+
+        // Reject an exact duplicate of an existing task from the same creator
+        // (same target, function, args, and interval) before allocating an ID.
+        let fingerprint = task_fingerprint(
+            &env,
+            &config.creator,
+            &config.target,
+            &config.function,
+            &config.args,
+            config.interval,
+        );
+        let fingerprint_key = DataKey::TaskFingerprint(fingerprint.clone());
+        if env.storage().persistent().has(&fingerprint_key) {
+            panic_with_error!(&env, Error::DuplicateTask);
+        }
+        env.storage().persistent().set(&fingerprint_key, &true);
 
         config.is_active = true;
 
@@ -2812,6 +2855,20 @@ impl SoroTaskContract {
 
         // Remove the task from the active index first to avoid stale scans.
         remove_active_task_id(&env, task_id);
+
+        // Free up the (creator, target, function, args, interval) fingerprint so
+        // the same parameters can be registered again after cancellation.
+        let fingerprint = task_fingerprint(
+            &env,
+            &config.creator,
+            &config.target,
+            &config.function,
+            &config.args,
+            config.interval,
+        );
+        env.storage()
+            .persistent()
+            .remove(&DataKey::TaskFingerprint(fingerprint));
 
         // Cleanup: Remove the task from storage
         env.storage().persistent().remove(&task_key);
@@ -5637,8 +5694,11 @@ pub(crate) mod tests {
             blocked_by: Vec::new(&env),
         };
 
+        let mut config2 = config.clone();
+        config2.interval = 7200; // distinct from `config` so it isn't a duplicate
+
         let id1 = client.register(&config);
-        let id2 = client.register(&config);
+        let id2 = client.register(&config2);
 
         assert_eq!(id1, 1);
         assert_eq!(id2, 2);
@@ -5723,9 +5783,12 @@ pub(crate) mod tests {
             yield_strategy: None,
         };
 
-        // Register 100 tasks and verify IDs are 1..=100
+        // Register 100 tasks and verify IDs are 1..=100. Each gets a distinct
+        // interval so none of them collide with the duplicate-registration check.
         for i in 1..=100u64 {
-            let id = client.register(&config);
+            let mut cfg = config.clone();
+            cfg.interval = 3600 + i;
+            let id = client.register(&cfg);
             assert_eq!(id, i, "Task {} should have ID {}", i, i);
         }
     }
@@ -5759,8 +5822,10 @@ pub(crate) mod tests {
         };
 
         let mut ids = Vec::new(&env);
-        for _ in 0..50 {
-            ids.push_back(client.register(&config));
+        for i in 0..50u64 {
+            let mut cfg = config.clone();
+            cfg.interval = 3600 + i; // distinct per registration, not a duplicate
+            ids.push_back(client.register(&cfg));
         }
 
         // Check all IDs are unique by comparing each pair
@@ -5806,18 +5871,26 @@ pub(crate) mod tests {
             yield_strategy: None,
         };
 
-        // Register 3 tasks (IDs 1, 2, 3)
-        let id1 = client.register(&config);
+        // Register 3 tasks (IDs 1, 2, 3). id2 uses the plain `config`; id1/id3
+        // use distinct intervals so all three are independent registrations.
+        let mut config1 = config.clone();
+        config1.interval = 3601;
+        let mut config3 = config.clone();
+        config3.interval = 3602;
+
+        let id1 = client.register(&config1);
         let id2 = client.register(&config);
-        let id3 = client.register(&config);
+        let id3 = client.register(&config3);
         assert_eq!(id1, 1);
         assert_eq!(id2, 2);
         assert_eq!(id3, 3);
 
-        // Cancel task 2
+        // Cancel task 2 - this also frees `config`'s duplicate-registration
+        // fingerprint (see test_cancel_frees_fingerprint_for_reregistration).
         client.cancel_task(&id2);
 
-        // Register another task - should get ID 4 (not reuse 2)
+        // Register another task with the same params as the cancelled one -
+        // should get ID 4 (not reuse 2), and must not be rejected as a duplicate.
         let id4 = client.register(&config);
         assert_eq!(id4, 4);
     }
@@ -5851,8 +5924,10 @@ pub(crate) mod tests {
         };
 
         let mut prev_id = 0u64;
-        for _ in 0..20 {
-            let current_id = client.register(&config);
+        for i in 0..20u64 {
+            let mut cfg = config.clone();
+            cfg.interval = 3600 + i; // distinct per registration, not a duplicate
+            let current_id = client.register(&cfg);
             assert!(
                 current_id > prev_id,
                 "New ID {} should be larger than previous ID {}",
@@ -5891,6 +5966,78 @@ pub(crate) mod tests {
 
         let result = client.try_register(&config);
         assert_eq!(result, Err(Ok(soroban_sdk::Error::from_contract_error(1))));
+    }
+
+    #[test]
+    fn test_duplicate_task_registration_rejected() {
+        let (env, id) = setup();
+        let client = SoroTaskContractClient::new(&env, &id);
+
+        let target = env.register(MockTarget, ());
+        let cfg = base_config(&env, target);
+
+        let first_id = client.register(&cfg);
+        let result = client.try_register(&cfg);
+
+        assert_eq!(
+            result,
+            Err(Ok(soroban_sdk::Error::from_contract_error(
+                Error::DuplicateTask as u32
+            )))
+        );
+        // The original registration is untouched and no second task was created.
+        assert!(client.get_task(&first_id).is_some());
+        assert!(client.get_task(&(first_id + 1)).is_none());
+    }
+
+    #[test]
+    fn test_duplicate_check_is_scoped_per_creator() {
+        let (env, id) = setup();
+        let client = SoroTaskContractClient::new(&env, &id);
+
+        let target = env.register(MockTarget, ());
+        let cfg_a = base_config(&env, target.clone());
+        let mut cfg_b = base_config(&env, target);
+        cfg_b.creator = Address::generate(&env); // different creator, otherwise identical
+
+        // Two different creators independently registering the same
+        // target/function/args/interval is not spam and must both succeed.
+        client.register(&cfg_a);
+        client.register(&cfg_b);
+    }
+
+    #[test]
+    fn test_differing_args_are_not_treated_as_duplicates() {
+        let (env, id) = setup();
+        let client = SoroTaskContractClient::new(&env, &id);
+
+        let target = env.register(MockTarget, ());
+        let mut cfg_a = base_config(&env, target.clone());
+        cfg_a.function = Symbol::new(&env, "add");
+        cfg_a.args = vec![&env, 1i64.into_val(&env), 2i64.into_val(&env)];
+        let mut cfg_b = base_config(&env, target);
+        cfg_b.function = Symbol::new(&env, "add");
+        cfg_b.args = vec![&env, 3i64.into_val(&env), 4i64.into_val(&env)];
+
+        client.register(&cfg_a);
+        client.register(&cfg_b);
+    }
+
+    #[test]
+    fn test_cancel_frees_fingerprint_for_reregistration() {
+        let (env, id) = setup();
+        let client = SoroTaskContractClient::new(&env, &id);
+
+        let target = env.register(MockTarget, ());
+        let cfg = base_config(&env, target);
+
+        let task_id = client.register(&cfg);
+        client.cancel_task(&task_id);
+
+        // Same (creator, target, function, args, interval) as the cancelled
+        // task must be registerable again, not permanently blocked.
+        let new_id = client.register(&cfg);
+        assert_ne!(new_id, task_id);
     }
 
     #[test]
@@ -7069,28 +7216,36 @@ pub(crate) mod tests {
         assert_eq!(id3, id2 + 1, "third ID must be second + 1");
     }
 
-    /// Assumption: registering a task with identical parameters twice creates
-    /// two distinct tasks with distinct IDs (no deduplication).
-    /// Why it matters: the contract has no duplicate-detection logic; callers
-    /// must not assume idempotency. Downstream systems must treat each returned
-    /// ID as a unique task even when the config is identical.
+    /// Assumption (superseded by duplicate-registration prevention, see
+    /// `test_duplicate_task_registration_rejected`): registering a task with
+    /// identical parameters used to silently create a second, independent
+    /// task. That is now rejected with `Error::DuplicateTask` - a config that
+    /// differs (e.g. a different target) still gets its own incrementing ID,
+    /// and the counter is not advanced by the rejected duplicate attempt.
     #[test]
-    fn test_id_allocation_duplicate_config_gets_new_id() {
+    fn test_id_allocation_distinct_configs_get_new_ids() {
         let (env, id) = setup();
         let client = SoroTaskContractClient::new(&env, &id);
 
         let target = env.register(MockTarget, ());
         let cfg = base_config(&env, target);
+        let mut other_cfg = cfg.clone();
+        other_cfg.target = env.register(MockTarget, ());
 
         let id1 = client.register(&cfg);
-        let id2 = client.register(&cfg);
+        let id2 = client.register(&other_cfg);
 
-        assert_ne!(id1, id2, "identical configs must produce distinct IDs");
+        assert_ne!(id1, id2, "distinct configs must produce distinct IDs");
         assert_eq!(id2, id1 + 1, "second registration must increment counter");
 
         // Both tasks must be independently retrievable
         assert!(client.get_task(&id1).is_some());
         assert!(client.get_task(&id2).is_some());
+
+        // A genuine duplicate of the first config must not consume an ID.
+        let dup_result = client.try_register(&cfg);
+        assert!(dup_result.is_err());
+        assert!(client.get_task(&(id2 + 1)).is_none());
     }
 
     /// Assumption: Soroban's single-transaction-at-a-time model prevents
