@@ -165,7 +165,10 @@ pub struct TaskConfig {
     pub function: Symbol,
     pub args: Vec<Val>,
     pub resolver: Option<Address>,
-    pub interval: u64,
+    /// Minimum seconds between executions. `u32` is sufficient here (max
+    /// ~136 years) - unlike `last_run`, which is a ledger timestamp and must
+    /// stay `u64` to match `env.ledger().timestamp()`.
+    pub interval: u32,
     pub last_run: u64,
     pub gas_balance: i128,
     pub whitelist: Vec<Address>,
@@ -1268,7 +1271,7 @@ impl SoroTaskContract {
                 .persistent()
                 .get::<DataKey, TaskConfig>(&DataKey::Task(task_id))
             {
-                if config.is_active && now >= config.last_run + config.interval {
+                if config.is_active && now >= config.last_run + config.interval as u64 {
                     executable.push_back(ExecutableTask {
                         task_id,
                         target: config.target,
@@ -2046,7 +2049,7 @@ impl SoroTaskContract {
                 .persistent()
                 .get::<DataKey, TaskConfig>(&DataKey::Task(task_id))
             {
-                if config.is_active && now >= config.last_run + config.interval {
+                if config.is_active && now >= config.last_run + config.interval as u64 {
                     executable.push_back(ExecutableTask {
                         task_id,
                         target: config.target,
@@ -2172,6 +2175,7 @@ impl SoroTaskContract {
             env, task_id, keeper, ExecutionStep::CheckWhitelist, StepResult::Passed, 0,
         );
 
+        if env.ledger().timestamp() < config.last_run + config.interval as u64 {
         // ── 5. Check interval ─────────────────────────────────────────────
         if env.ledger().timestamp() < config.last_run + config.interval {
             trace_steps.push_back(events::ExecutionStepRecord {
