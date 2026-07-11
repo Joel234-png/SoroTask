@@ -36,7 +36,7 @@ export async function trackedFetch(
   trackApiRequest(url, method);
 
   try {
-    const response = (originalFetch || fetch)(input, init);
+    const response = await (originalFetch || fetch)(input, init);
 
     // Track response status
     if (response.status >= 400) {

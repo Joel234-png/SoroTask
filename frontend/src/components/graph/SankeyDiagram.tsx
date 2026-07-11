@@ -423,7 +423,7 @@ export function SankeyDiagramContent({
                   fill="none"
                   className="transition-all duration-150 cursor-pointer"
                   style={{
-                    opacity: link.opacity ?? (hoveredLink ? (isHovered ? 0.95 : 0.2) : 0.65),
+                    opacity: (link as any).opacity ?? (hoveredLink ? (isHovered ? 0.95 : 0.2) : 0.65),
                   }}
                   onMouseEnter={(e) => {
                     setHoveredLink({
@@ -473,7 +473,7 @@ export function SankeyDiagramContent({
             {filteredLayout.layoutNodes.map((node) => {
               const isHovered = hoveredNode?.id === node.id;
               const isAnyNodeHovered = hoveredNode !== null;
-              const opacity = node.opacity ?? (isAnyNodeHovered ? (isHovered ? 1.0 : 0.3) : 1.0);
+              const opacity = (node as any).opacity ?? (isAnyNodeHovered ? (isHovered ? 1.0 : 0.3) : 1.0);
 
               return (
                 <g

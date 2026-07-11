@@ -33,7 +33,7 @@ import type {
   NetworkHealth,
 } from "../sync/types";
 
-export type { ExecutionQueueHandler, NetworkMonitorConfig, SyncConfig, QueuedSyncAction };
+export type { ExecutionQueueHandler, NetworkMonitorConfig, SyncConfig, QueuedSyncAction, SyncManagerStore };
 import { createLogger } from "../logger";
 
 const logger = createLogger("sync-manager");
@@ -262,8 +262,8 @@ export class SyncManager {
 
   private captureSentry(err: unknown): void {
     try {
-      if (typeof globalThis.Sentry !== "undefined") {
-        globalThis.Sentry.captureException(err, {
+      if (typeof (globalThis as any).Sentry !== "undefined") {
+        (globalThis as any).Sentry.captureException(err, {
           tags: {
             component: "sync-manager",
           },
@@ -298,7 +298,7 @@ export function initSyncManager(
     maxAttempts: deps.queueConfig?.maxAttempts ?? 5,
     baseDelayMs: deps.queueConfig?.baseDelayMs ?? 1_000,
     maxDelayMs: deps.queueConfig?.maxDelayMs ?? 30_000,
-    rpcEndpoint: "",
+
     rpcHealthCheckIntervalMs: deps.queueConfig?.rpcHealthCheckIntervalMs ?? 30_000,
     rpcTimeoutMs: deps.queueConfig?.rpcTimeoutMs ?? 5_000,
     rpcRequiredConsecutiveSuccesses: deps.queueConfig?.rpcRequiredConsecutiveSuccesses ?? 2,

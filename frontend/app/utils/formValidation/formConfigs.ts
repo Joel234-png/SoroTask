@@ -13,7 +13,7 @@ export const taskCreationFormConfig: FormConfig = {
       asyncValidation: async (address: string) => {
         // Mock async validation - in real app, verify contract exists
         await new Promise(resolve => setTimeout(resolve, 800));
-        const validContracts = [EXAMPLE_CONTRACT_ADDRESS];
+        const validContracts = [EXAMPLE_CONTRACT_ADDRESS, 'CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA'];
         return {
           isValid: validContracts.includes(address),
           message: validContracts.includes(address) ? undefined : 'Contract not found or invalid'

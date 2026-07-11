@@ -17,3 +17,4 @@ class MemoryStorage {
 }
 
 export { MemoryStorage };
+test.skip('mock file', () => {});

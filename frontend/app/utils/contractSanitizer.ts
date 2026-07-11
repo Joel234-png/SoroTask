@@ -1,4 +1,4 @@
-import { SorobanRpc } from 'soroban-client';
+
 
 /**
  * Technical Specification Definitions for Sanitizer Limits

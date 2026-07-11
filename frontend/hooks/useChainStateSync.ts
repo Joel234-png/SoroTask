@@ -7,7 +7,7 @@
  */
 
 import { useState, useEffect, useCallback, useRef } from 'react';
-import { SorobanRpc } from '@stellar/stellar-sdk';
+import { rpc } from '@stellar/stellar-sdk';
 
 export interface ChainState {
   ledgerSequence: number;
@@ -77,7 +77,7 @@ export function useChainStateSync(config: ChainSyncConfig): ChainSyncResult {
   const [error, setError] = useState<string | null>(null);
   const [isHealthy, setIsHealthy] = useState(true);
 
-  const rpcRef = useRef<SorobanRpc.Server | null>(null);
+  const rpcRef = useRef<rpc.Server | null>(null);
   const syncIntervalRef = useRef<NodeJS.Timeout | null>(null);
   const lastLedgerSequenceRef = useRef<number>(0);
   const pendingTransactionsRef = useRef<Set<string>>(new Set());
@@ -85,7 +85,7 @@ export function useChainStateSync(config: ChainSyncConfig): ChainSyncResult {
   // Initialize RPC client
   useEffect(() => {
     try {
-      rpcRef.current = new SorobanRpc.Server(rpcUrl);
+      rpcRef.current = new rpc.Server(rpcUrl);
     } catch (err) {
       setError(`Failed to initialize RPC: ${err instanceof Error ? err.message : 'Unknown error'}`);
       setIsHealthy(false);
@@ -108,7 +108,7 @@ export function useChainStateSync(config: ChainSyncConfig): ChainSyncResult {
     try {
       const ledger = await rpcRef.current.getLatestLedger();
       const currentSequence = Number(ledger.sequence);
-      const currentTimestamp = Number(ledger.timestamp);
+      const currentTimestamp = Number((ledger as any).timestamp || Date.now() / 1000);
 
       // Detect reorg
       const reorgDepth = calculateReorgDepth(
@@ -223,14 +223,14 @@ export function useChainStateSync(config: ChainSyncConfig): ChainSyncResult {
         try {
           const response = await rpcRef.current.getTransaction(hash);
           
-          if (response.status === SorobanRpc.Api.GetTransactionStatus.SUCCESS) {
+          if (response.status === rpc.Api.GetTransactionStatus.SUCCESS) {
             updates.set(hash, {
               ...tx,
               status: 'success',
               ledgerSequence: currentLedger,
               timestamp: Date.now(),
             });
-          } else if (response.status === SorobanRpc.Api.GetTransactionStatus.FAILED) {
+          } else if (response.status === rpc.Api.GetTransactionStatus.FAILED) {
             updates.set(hash, {
               ...tx,
               status: 'failed',

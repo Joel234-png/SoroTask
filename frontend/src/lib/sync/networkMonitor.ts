@@ -72,7 +72,7 @@ export class NetworkMonitor {
     if (this.timer) return;
 
     this.probe();
-    this.timer = window.setTimeout(() => {
+    this.timer = setTimeout(() => {
       this.tick();
     }, this.config.healthCheckIntervalMs);
   }
@@ -161,7 +161,7 @@ export class NetworkMonitor {
   private tick(): void {
     if (this.destroyed) return;
     void this.probe();
-    this.timer = window.setTimeout(() => this.tick(), this.config.healthCheckIntervalMs);
+    this.timer = setTimeout(() => this.tick(), this.config.healthCheckIntervalMs);
   }
 
   private handleBrowserOnline = (): void => {

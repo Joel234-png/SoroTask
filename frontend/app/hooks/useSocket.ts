@@ -4,6 +4,8 @@ import { useEffect, useRef, useCallback } from 'react';
 import { io, Socket } from 'socket.io-client';
 import { wrapSocketWithTracking, trackSocketSubscription } from '@/src/lib/errors/socketTracker';
 
+const KEEPER_URL = process.env.NEXT_PUBLIC_KEEPER_URL ?? "http://localhost:3000";
+
 /** Exponential back-off: 1s → 2s → 4s → … capped at 30 s */
 function backoff(attempt: number): number {
   return Math.min(1000 * 2 ** attempt, 30_000);

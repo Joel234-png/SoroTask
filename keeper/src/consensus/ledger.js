@@ -69,7 +69,7 @@ class ConsensusLedger {
    */
   getDecision(taskId, epoch) {
     const key = `${taskId}:${epoch}`;
-    return this.entries.get(key);
+    return this.entries.get(key) || null;
   }
 
   /**

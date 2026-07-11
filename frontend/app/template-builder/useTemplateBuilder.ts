@@ -8,6 +8,8 @@ import {
   AbiFunction,
   AbiParseResult,
   FlowTemplate,
+  AbiParam,
+  AbiParamType,
 } from './types';
 
 // ---------------------------------------------------------------------------
@@ -19,6 +21,91 @@ interface TemplateBuilderState {
   templateName: string;
   importedAbis: ContractAbi[];
   errors: Record<string, string>; // instanceId → error message
+}
+
+const KNOWN_PARAM_TYPES: AbiParamType[] = [
+  'address',
+  'u8',
+  'u16',
+  'u32',
+  'u64',
+  'u128',
+  'i8',
+  'i16',
+  'i32',
+  'i64',
+  'i128',
+  'bool',
+  'string',
+  'bytes',
+  'symbol',
+  'void',
+];
+
+function normalizeAbiType(rawType: unknown): AbiParamType {
+  if (typeof rawType === 'string') {
+    return (KNOWN_PARAM_TYPES.includes(rawType as AbiParamType)
+      ? (rawType as AbiParamType)
+      : 'string') as AbiParamType;
+  }
+
+  if (typeof rawType === 'object' && rawType !== null) {
+    const candidate = rawType as Record<string, unknown>;
+    const nested = candidate.kind ?? candidate.type ?? candidate.name;
+    if (typeof nested === 'string') {
+      return normalizeAbiType(nested);
+    }
+  }
+
+  return 'string';
+}
+
+function normalizeAbiParam(param: unknown): AbiParam | null {
+  if (!param || typeof param !== 'object') return null;
+
+  const candidate = param as Record<string, unknown>;
+  const name = typeof candidate.name === 'string' ? candidate.name : '';
+  if (!name) return null;
+
+  return {
+    name,
+    type: normalizeAbiType(candidate.type),
+    optional: candidate.optional === true,
+  };
+}
+
+function isArgConfigured(value: string | undefined, param: AbiParam): boolean {
+  const trimmed = value?.trim() ?? '';
+  if (!trimmed) {
+    return param.optional === true;
+  }
+
+  switch (param.type) {
+    case 'bool':
+      return ['true', 'false', '1', '0'].includes(trimmed.toLowerCase());
+    case 'u8':
+    case 'u16':
+    case 'u32':
+    case 'u64':
+    case 'u128':
+      return /^\d+$/.test(trimmed);
+    case 'i8':
+    case 'i16':
+    case 'i32':
+    case 'i64':
+    case 'i128':
+      return /^-?\d+$/.test(trimmed);
+    case 'address':
+      return trimmed.startsWith('C') || /^G[A-Z2-7]{55}$/.test(trimmed);
+    default:
+      return true;
+  }
+}
+
+function isBlockConfigured(block: ActionBlock): boolean {
+  return block.inputs
+    .filter((param) => !param.optional)
+    .every((param) => isArgConfigured(block.args[param.name], param));
 }
 
 const initialState: TemplateBuilderState = {
@@ -73,9 +160,7 @@ function reducer(state: TemplateBuilderState, action: Action): TemplateBuilderSt
       const blocks = state.blocks.map((b) => {
         if (b.instanceId !== action.instanceId) return b;
         const args = { ...b.args, [action.argName]: action.value };
-        const isConfigured = b.inputs
-          .filter((p) => !p.optional)
-          .every((p) => args[p.name]?.trim());
+        const isConfigured = isBlockConfigured({ ...b, args });
         return { ...b, args, isConfigured };
       });
       return { ...state, blocks };
@@ -148,7 +233,13 @@ export function parseAbi(
     if (!fns.every((f) => typeof f.name === 'string' && Array.isArray(f.inputs))) {
       return { success: false, error: 'Array items must have name and inputs fields' };
     }
-    return { success: true, abi: { contractAddress, label, functions: fns } };
+    const normalizedFunctions = fns.map((fn) => ({
+      ...fn,
+      inputs: (fn.inputs ?? [])
+        .map(normalizeAbiParam)
+        .filter((param): param is AbiParam => param !== null),
+    }));
+    return { success: true, abi: { contractAddress, label, functions: normalizedFunctions } };
   }
 
   // Accept ContractAbi object
@@ -159,9 +250,15 @@ export function parseAbi(
     Array.isArray((parsed as ContractAbi).functions)
   ) {
     const obj = parsed as ContractAbi;
+    const normalizedFunctions = (obj.functions ?? []).map((fn) => ({
+      ...fn,
+      inputs: (fn.inputs ?? [])
+        .map(normalizeAbiParam)
+        .filter((param): param is AbiParam => param !== null),
+    }));
     return {
       success: true,
-      abi: { contractAddress, label, functions: obj.functions },
+      abi: { contractAddress, label, functions: normalizedFunctions },
     };
   }
 
@@ -184,19 +281,7 @@ function makeInstanceId(): string {
 export function useTemplateBuilder() {
   const [state, dispatch] = useReducer(reducer, initialState);
 
-  const addBlock = useCallback((def: ActionDefinition) => {
-    const block: ActionBlock = {
-      instanceId: makeInstanceId(),
-      definitionId: def.id,
-      label: def.label,
-      category: def.category,
-      icon: def.icon,
-      contractAddress: def.defaultContractAddress ?? '',
-      functionName: def.functionName,
-      inputs: def.inputs,
-      args: {},
-      isConfigured: def.inputs.filter((p) => !p.optional).length === 0,
-    };
+  const addBlock = useCallback((block: ActionBlock) => {
     dispatch({ type: 'ADD_BLOCK', block });
   }, []);
 

@@ -17,6 +17,60 @@ pub enum StateChangeType {
     ConfigUpdated,
 }
 
+/// Identifies a single step in the task execution pipeline.
+/// Each variant maps to a gate or operation inside execute_internal().
+#[contracttype]
+#[derive(Copy, Clone, Debug, Eq, PartialEq, PartialOrd, Ord)]
+#[repr(u32)]
+pub enum ExecutionStep {
+    ValidateAuth = 1,
+    LoadTask = 2,
+    CheckActive = 3,
+    CheckWhitelist = 4,
+    CheckInterval = 5,
+    CheckDependencies = 6,
+    EvaluateResolver = 7,
+    CheckVrfCondition = 8,
+    CheckZkCondition = 9,
+    CalculateFee = 10,
+    CheckBalance = 11,
+    ExecuteYield = 12,
+    CallTarget = 13,
+    PayKeeper = 14,
+    UpdateState = 15,
+}
+
+/// Result of a single execution step.
+#[contracttype]
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+pub enum StepResult {
+    Passed,
+    Failed,
+    Skipped,
+}
+
+/// Record of one step during task execution.
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ExecutionStepRecord {
+    pub step: ExecutionStep,
+    pub result: StepResult,
+    pub detail: u32,
+}
+
+/// Event payload for a step-level execution trace.
+/// Published once per step during execute_internal().
+#[contracttype]
+#[derive(Clone, Debug)]
+pub struct ExecutionStepEvent {
+    pub task_id: u64,
+    pub keeper: Address,
+    pub step: ExecutionStep,
+    pub result: StepResult,
+    pub detail: u32,
+    pub timestamp: u64,
+}
+
 /// Represents the context of an execution attempt
 #[contracttype]
 #[derive(Clone, Debug)]
@@ -127,6 +181,35 @@ impl EventLogger {
         let topics = (
             Symbol::new(env, "sorotask"),
             Symbol::new(env, "execution"),
+            task_id,
+        );
+        env.events().publish(topics, event_data);
+    }
+
+    /// Logs a single execution step trace event.
+    /// Off-chain indexers and the keeper can consume these to build
+    /// a full picture of where the execution path failed.
+    pub fn log_execution_step(
+        env: &Env,
+        task_id: u64,
+        keeper: &Address,
+        step: ExecutionStep,
+        result: StepResult,
+        detail: u32,
+    ) {
+        let timestamp = env.ledger().timestamp();
+        let event_data = ExecutionStepEvent {
+            task_id,
+            keeper: keeper.clone(),
+            step,
+            result,
+            detail,
+            timestamp,
+        };
+
+        let topics = (
+            Symbol::new(env, "sorotask"),
+            Symbol::new(env, "exec_step"),
             task_id,
         );
         env.events().publish(topics, event_data);

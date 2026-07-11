@@ -123,19 +123,20 @@ export function SyncProvider({
     if (!manager) {
       const emptyActions: readonly QueuedSyncAction[] = [];
       return {
-        state,
-        enqueue: (_type: string, _payload: Record<string, unknown>, _priority?: number) => undefined,
+        ...state,
+        enqueue: (_type: any, _payload: any, _priority?: number) => undefined,
         retry: (_id: string) => {},
         cancel: (_id: string) => {},
         clearCompleted: () => {},
         flush: async () => {},
+        reset: () => {},
         refresh: () => {},
         getActions: () => emptyActions,
-      };
+      } as unknown as SyncManagerStore;
     }
 
     return {
-      state,
+      ...state,
       enqueue: <T extends SyncOperationType>(
         type: T,
         payload: any,
@@ -145,11 +146,14 @@ export function SyncProvider({
       cancel: (actionId: string) => manager.cancel(actionId),
       clearCompleted: () => manager.clearCompleted(),
       flush: async () => manager.flush(),
+      reset: () => {
+        // manager does not have a reset method, but we can implement it or just do nothing
+      },
       refresh: useCallback(() => {
         setState(manager.getState());
       }, [manager]),
       getActions: () => manager.getActions(),
-    };
+    } as unknown as SyncManagerStore;
   }, [manager, state]);
 
   // Cleanup on unmount

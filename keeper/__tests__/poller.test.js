@@ -29,7 +29,7 @@ jest.mock('@stellar/stellar-sdk', () => {
   };
 });
 
-jest.mock('../../taskValidator', () => ({
+jest.mock('../src/taskValidator', () => ({
   validateTaskPayload: jest.fn(() => ({ isValid: true, errors: [] })),
 }));
 

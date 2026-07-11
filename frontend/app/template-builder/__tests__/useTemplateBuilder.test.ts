@@ -82,6 +82,23 @@ describe('parseAbi', () => {
     expect(result.abi?.contractAddress).toBe('CNEW'); // caller address wins
   });
 
+  it('parses Soroban-style ABI objects with typed inputs', () => {
+    const raw = JSON.stringify({
+      name: 'Counter',
+      version: '2',
+      functions: [
+        {
+          name: 'increment',
+          inputs: [{ name: 'by', type: { kind: 'u32' } }],
+          outputs: [],
+        },
+      ],
+    });
+    const result = parseAbi(raw, 'CADDRESS', 'Counter');
+    expect(result.success).toBe(true);
+    expect(result.abi?.functions[0].inputs[0].type).toBe('u32');
+  });
+
   it('returns error when array items are malformed', () => {
     const result = parseAbi(JSON.stringify([{ notName: 'x' }]), 'CADDR');
     expect(result.success).toBe(false);
@@ -197,6 +214,23 @@ describe('useTemplateBuilder', () => {
     act(() => result.current.addBlock(HARVEST));
     act(() => result.current.updateArg('ghost', 'pool_id', 'X'));
     expect(result.current.blocks[0].args['pool_id']).toBeUndefined();
+  });
+
+  it('requires valid values for typed numeric inputs', () => {
+    const { result } = setup();
+    act(() =>
+      result.current.addBlock({
+        ...HARVEST,
+        inputs: [{ name: 'amount', type: 'u64' }],
+      }),
+    );
+    const id = result.current.blocks[0].instanceId;
+
+    act(() => result.current.updateArg(id, 'amount', 'not-a-number'));
+    expect(result.current.blocks[0].isConfigured).toBe(false);
+
+    act(() => result.current.updateArg(id, 'amount', '42'));
+    expect(result.current.blocks[0].isConfigured).toBe(true);
   });
 
   // --- updateContractAddress ---

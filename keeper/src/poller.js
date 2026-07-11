@@ -1,7 +1,7 @@
 const { Contract, xdr, TransactionBuilder, BASE_FEE, Networks, scValToNative } = require('@stellar/stellar-sdk');
 const { createRateLimiter } = require('./concurrency');
 const { createLogger } = require('./logger');
-const { validateTaskPayload } = require('../../taskValidator');
+const { validateTaskPayload } = require('./taskValidator');
 const { TaskFilterChain } = require('./taskFilter');
 const { SimulationCache } = require('./simulationCache');
 const { ReadBatcher } = require('./readBatcher');

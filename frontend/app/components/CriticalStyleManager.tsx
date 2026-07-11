@@ -1,5 +1,5 @@
 import React, { useEffect, useState, useMemo } from 'react';
-import { SecureAssetOptimizer, OptimizationMetrics } from '../utils/performance/assetOptimizer';
+import { SecureAssetOptimizer, OptimizationMetrics } from '../utils/assetOptimizer';
 import { Layers, Activity, ShieldCheck, AlertCircle } from 'lucide-react';
 
 interface CriticalStyleManagerProps {
