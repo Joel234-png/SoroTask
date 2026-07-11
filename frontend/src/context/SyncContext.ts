@@ -9,6 +9,8 @@ import type {
   QueuedSyncAction,
 } from "@/src/lib/sync/types";
 
+export type { SyncManagerStore };
+
 export const SyncContext = createContext<SyncManagerStore | null>(null);
 
 export function useSyncContext(): SyncManagerStore {

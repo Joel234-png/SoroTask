@@ -50,12 +50,14 @@ class TaskRegistry extends EventEmitter {
 
     // Check if snapshot is too old or version mismatch
     const latestLedger = await this.server.getLatestLedger();
-    const staleThreshold = this.snapshot.staleThresholdLedgers || 100000;
-    if (this.lastSeenLedger > 0 && (latestLedger.sequence - this.lastSeenLedger) > staleThreshold) {
+    const isSnapshotStale = this.snapshot && typeof this.snapshot.isStale === 'function'
+      ? this.snapshot.isStale(this.lastSeenLedger, latestLedger.sequence, this._snapshotSavedAt)
+      : (this.lastSeenLedger > 0 && (latestLedger.sequence - this.lastSeenLedger) > (this.snapshot?.staleThresholdLedgers || 100000));
+
+    if (isSnapshotStale) {
       this.logger.warn('Snapshot is too stale, triggering full refresh', {
         lastSeen: this.lastSeenLedger,
         current: latestLedger.sequence,
-        threshold: staleThreshold
       });
       this.lastSeenLedger = 0;
       this.tasks.clear();

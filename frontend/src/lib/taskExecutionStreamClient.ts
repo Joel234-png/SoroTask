@@ -56,8 +56,7 @@ export class TaskExecutionStreamClient extends EventEmitter {
       this.setConnectionState('connecting');
 
       try {
-        this.socket = io(KEEPER_URL, {
-          namespace: STREAM_NAMESPACE,
+        this.socket = io(`${KEEPER_URL}${STREAM_NAMESPACE}`, {
           transports: ['websocket'],
           reconnection: true,
           reconnectionDelay: this.reconnectDelay,

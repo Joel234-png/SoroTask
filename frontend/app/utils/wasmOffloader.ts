@@ -40,7 +40,7 @@ export class FallbackJsEngine implements CryptoEngine {
     }
 
     public async hashPayload(data: Uint8Array): Promise<Uint8Array> {
-        const buffer = await crypto.subtle.digest('SHA-256', data);
+        const buffer = await crypto.subtle.digest('SHA-256', data as unknown as BufferSource);
         return new Uint8Array(buffer);
     }
 }

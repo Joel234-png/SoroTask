@@ -244,7 +244,7 @@ export const KeeperTable: React.FC<KeeperTableProps> = ({
   const virtualizer = useVirtualizer({
     count: sortedKeepers.length,
     getScrollElement: () => parentRef.current,
-    estimateSize: isMobile ? 220 : 50,
+    estimateSize: () => (isMobile ? 220 : 50),
     overscan: 10,
     enabled: isVirtualized && sortedKeepers.length > pageSize,
   });

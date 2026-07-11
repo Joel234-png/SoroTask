@@ -33,7 +33,7 @@ describe("KeeperMetricsPage", () => {
   it("renders keeper performance summary", () => {
     render(<KeeperMetricsPage />);
     expect(screen.getByText("Keeper Metrics")).toBeInTheDocument();
-    expect(screen.getByText("Executed")).toBeInTheDocument();
-    expect(screen.getByText("Success rate")).toBeInTheDocument();
+    expect(screen.getAllByText("Executed")[0]).toBeInTheDocument();
+    expect(screen.getAllByText("Success rate")[0]).toBeInTheDocument();
   });
 });

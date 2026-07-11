@@ -1,5 +1,5 @@
 import React, { useState, useMemo } from 'react';
-import { ContractCalldataSanitizer, SanitizationResult } from '../utils/sanitizer/contractSanitizer';
+import { ContractCalldataSanitizer, SanitizationResult } from '../utils/contractSanitizer';
 import { AlertTriangle, CheckCircle2, ShieldAlert } from 'lucide-react';
 
 interface SanitizedCalldataRunnerProps {

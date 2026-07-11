@@ -3,6 +3,9 @@
 import { useSession, signOut } from "next-auth/react";
 import { useRouter } from "next/navigation";
 import { useEffect, useState } from "react";
+import { useOnboarding } from "@/src/components/onboarding/OnboardingProvider";
+import { HardwareWalletPanel } from "@/src/components/wallet/HardwareWalletPanel";
+import { TxBatchRegistration } from "@/src/components/wallet/TxBatchRegistration";
 
 interface ProviderConfig {
   name: string;
@@ -16,6 +19,7 @@ export default function SettingsPage() {
   const router = useRouter();
   const { start: startOnboarding } = useOnboarding();
   const [isSigningOut, setIsSigningOut] = useState(false);
+  const [hardwareSession, setHardwareSession] = useState<any>(null);
   const [notificationPrefs, setNotificationPrefs] = useState({
     categories: { tasks: true, mentions: true, system: true },
     channels: { inApp: true, browser: true },

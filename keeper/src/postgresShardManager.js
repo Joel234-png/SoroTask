@@ -32,9 +32,8 @@ function normalizeDbShardConfig(config = {}) {
 
   const scaleDownThreshold = Number.isFinite(config.scaleDownThreshold)
     && config.scaleDownThreshold >= 0
-    && config.scaleDownThreshold < scaleUpThreshold
     ? config.scaleDownThreshold
-    : Math.min(DEFAULTS.scaleDownThreshold, scaleUpThreshold * 0.6);
+    : Math.min(DEFAULTS.scaleDownThreshold, Number((scaleUpThreshold * 0.6).toFixed(4)));
 
   const userCapacityPerShard = Number.isFinite(config.userCapacityPerShard) && config.userCapacityPerShard >= 1
     ? config.userCapacityPerShard

@@ -55,6 +55,7 @@ describe('Voter', () => {
       voter.startVotingSession('task-1', 1, 'keeper-1');
       voter.recordVote('task-1', 1, 'keeper-2', true);
       voter.recordVote('task-1', 1, 'keeper-2', false); // Should be ignored
+      voter.recordVote('task-1', 1, 'keeper-3', false);
 
       const session = voter.getSession('task-1', 1);
       expect(session.approvalCount).toBe(1);
@@ -64,6 +65,7 @@ describe('Voter', () => {
     test('should track rejections', () => {
       voter.startVotingSession('task-1', 1, 'keeper-1');
       voter.recordVote('task-1', 1, 'keeper-2', false);
+      voter.recordVote('task-1', 1, 'keeper-3', false);
       voter.recordVote('task-1', 1, 'keeper-3', false);
 
       const session = voter.getSession('task-1', 1);
@@ -79,6 +81,7 @@ describe('Voter', () => {
       expect(voter.hasApprovalQuorum('task-1', 1)).toBe(false);
       
       voter.recordVote('task-1', 1, 'keeper-1', true);
+      voter.recordVote('task-1', 1, 'keeper-2', true);
       expect(voter.hasApprovalQuorum('task-1', 1)).toBe(true);
     });
 
@@ -86,6 +89,7 @@ describe('Voter', () => {
       voter.startVotingSession('task-1', 1, 'keeper-1');
       
       voter.recordVote('task-1', 1, 'keeper-2', false);
+      voter.recordVote('task-1', 1, 'keeper-3', false);
       expect(voter.hasRejectionQuorum('task-1', 1)).toBe(true);
     });
 
@@ -107,6 +111,7 @@ describe('Voter', () => {
     test('should transition to APPROVED on quorum', () => {
       voter.startVotingSession('task-1', 1, 'keeper-1');
       voter.recordVote('task-1', 1, 'keeper-1', true);
+      voter.recordVote('task-1', 1, 'keeper-2', true);
 
       expect(voter.hasApprovalQuorum('task-1', 1)).toBe(true);
       const session = voter.getSession('task-1', 1);
@@ -116,6 +121,7 @@ describe('Voter', () => {
     test('should transition to REJECTED on quorum', () => {
       voter.startVotingSession('task-1', 1, 'keeper-1');
       voter.recordVote('task-1', 1, 'keeper-2', false);
+      voter.recordVote('task-1', 1, 'keeper-3', false);
 
       expect(voter.hasRejectionQuorum('task-1', 1)).toBe(true);
       const session = voter.getSession('task-1', 1);

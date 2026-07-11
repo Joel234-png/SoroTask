@@ -25,7 +25,7 @@ export function CohortAnalysisDashboard() {
         Sentry.addSentryBreadcrumb("cohort", "Cohort data loaded successfully", { count: json.length });
       } catch (err: any) {
         setError('Fallback system activated: Unable to load cohort data securely.');
-        Sentry.captureException(err);
+        Sentry.captureSentryException(err);
       } finally {
         setLoading(false);
       }

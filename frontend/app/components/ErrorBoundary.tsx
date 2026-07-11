@@ -1,7 +1,7 @@
 "use client";
 
 import { Component, type ReactNode } from "react";
-import * as Sentry from "@/src/lib/errors/sentry";
+import * as Sentry from "@sentry/nextjs";
 
 interface Props {
   children: ReactNode;

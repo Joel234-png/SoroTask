@@ -257,7 +257,7 @@ No additional text or markdown.`;
     } finally {
       setIsSuggesting(false);
     }
-  }, [client, pageContext, pathname, clearError]);
+  }, [pageContext, pathname, clearError]);
 
   const value = useMemo<AIAssistantContextValue>(
     () => ({

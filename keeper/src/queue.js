@@ -184,7 +184,8 @@ class ExecutionQueue extends EventEmitter {
 
     const taskItems = (tasksToEnqueue || [])
       .map(buildTaskItem)
-      .filter((taskItem) => taskItem.taskId !== undefined && !this._shouldSkipTask(taskItem.taskId));
+      .filter((taskItem) => taskItem.taskId !== undefined && !this._shouldSkipTask(taskItem.taskId))
+      .sort((a, b) => b.priority - a.priority);
 
     this.depth = taskItems.length;
 
@@ -392,7 +393,8 @@ class ExecutionQueue extends EventEmitter {
         dueLedger: task.dueLedger,
         retryMetadata: task,
       }))
-      .filter((taskItem) => !this._shouldSkipTask(taskItem.taskId));
+      .filter((taskItem) => !this._shouldSkipTask(taskItem.taskId))
+      .sort((a, b) => b.priority - a.priority);
 
     this.depth = retryItems.length;
 

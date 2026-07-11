@@ -64,6 +64,7 @@ describe('Proposer', () => {
     });
 
     test('should return executor from provided candidates', () => {
+      proposer.createProposal('task-1');
       const candidates = ['keeper-1', 'keeper-2', 'keeper-3'];
       const executor = proposer.assignExecutor('task-1', 1, candidates);
       expect(candidates).toContain(executor);
@@ -79,6 +80,7 @@ describe('Proposer', () => {
     });
 
     test('should handle single candidate', () => {
+      proposer.createProposal('task-1');
       const executor = proposer.assignExecutor('task-1', 1, ['keeper-only']);
       expect(executor).toBe('keeper-only');
     });
