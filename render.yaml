@@ -6,10 +6,6 @@ services:
     dockerfilePath: keeper/Dockerfile
     plan: free
     healthCheckPath: /health
-    disk:
-      name: keeper-data
-      mountPath: /app/data
-      sizeGB: 1
     envVars:
       - key: PORT
         value: "3000"
@@ -26,10 +22,6 @@ services:
     dockerContext: indexer
     dockerfilePath: indexer/Dockerfile
     plan: free
-    disk:
-      name: indexer-data
-      mountPath: /app/data
-      sizeGB: 1
     envVars:
       - key: PORT
         value: "4000"
