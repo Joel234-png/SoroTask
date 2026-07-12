@@ -2,7 +2,7 @@ const sqlite3 = require('sqlite3').verbose();
 const path = require('path');
 
 // Connect to the same DB file as the indexer
-const DB_FILE = path.resolve(__dirname, '../../indexer.db');
+const DB_FILE = process.env.DB_FILE || path.resolve(__dirname, '../../indexer.db');
 const db = new sqlite3.Database(DB_FILE);
 
 // Helper function to query the DB with Promises

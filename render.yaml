@@ -1,0 +1,38 @@
+services:
+  - type: web
+    name: sorotask-keeper
+    env: docker
+    dockerContext: keeper
+    dockerfilePath: keeper/Dockerfile
+    plan: free
+    healthCheckPath: /health
+    disk:
+      name: keeper-data
+      mountPath: /app/data
+      sizeGB: 1
+    envVars:
+      - key: PORT
+        value: "3000"
+      - key: PRIVATE_KEY
+        sync: false # You must set this in the Render dashboard!
+      - key: NETWORK_PASSPHRASE
+        value: "Test SDF Future Network ; October 2022"
+      - key: RPC_URL
+        value: "https://rpc-futurenet.stellar.org"
+
+  - type: web
+    name: sorotask-indexer
+    env: docker
+    dockerContext: indexer
+    dockerfilePath: indexer/Dockerfile
+    plan: free
+    disk:
+      name: indexer-data
+      mountPath: /app/data
+      sizeGB: 1
+    envVars:
+      - key: PORT
+        value: "4000"
+      # Update DB path to use the persistent disk mounted at /app/data
+      - key: DB_FILE
+        value: "/app/data/indexer.db"

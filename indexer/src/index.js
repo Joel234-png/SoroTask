@@ -10,8 +10,8 @@ const { startApiServer } = require("./api");
 
 // Configuration
 const RPC_URL = "https://soroban-testnet.stellar.org"; // Change as needed
-const CONTRACT_ID = "CCKANVNJJIKGYU4TYTZBGL5JQVLPW33KQUW6JFHPLKXDLQEZETHOUAMJ"; // Replace with actual contract ID
-const DB_FILE = "./indexer.db";
+const CONTRACT_ID = process.env.CONTRACT_ID || "CCKANVNJJIKGYU4TYTZBGL5JQVLPW33KQUW6JFHPLKXDLQEZETHOUAMJ"; // Replace with actual contract ID
+const DB_FILE = process.env.DB_FILE || "./indexer.db";
 const POLL_INTERVAL_MS = 6000; // 6 seconds
 const RECONCILE_INTERVAL_MS = 300000; // 5 minutes
 const STALE_CLEANUP_INTERVAL_MS = 86400000; // 24 hours
