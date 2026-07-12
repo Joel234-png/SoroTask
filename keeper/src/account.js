@@ -48,22 +48,6 @@ async function initializeKeeperAccount() {
     throw new Error(`Failed to fetch keeper account from RPC: ${err.message}`);
   }
 
-  // Validate balance
-  const minBalanceXlm = parseFloat(process.env.MIN_KEEPER_BALANCE_XLM || '1.0');
-  const haltOnLowBalance = process.env.HALT_ON_LOW_BALANCE === 'true';
-
-  const nativeBalance = accountResponse.balances.find(b => b.asset_type === 'native');
-  const balanceXlm = nativeBalance ? parseFloat(nativeBalance.balance) : 0;
-
-  if (balanceXlm < minBalanceXlm) {
-    const warning = `Keeper balance (${balanceXlm} XLM) is below the recommended minimum of ${minBalanceXlm} XLM.`;
-    if (haltOnLowBalance) {
-      throw new Error(`HALTING: ${warning}`);
-    } else {
-      logger.warn('Low balance warning', { balanceXlm, minBalanceXlm });
-    }
-  }
-
   return { keypair, accountResponse };
 }
 

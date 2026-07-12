@@ -194,18 +194,23 @@ class TaskRegistry extends EventEmitter {
         this.lastSeenLedger = Math.max(currentLedger - 720, 0);
       }
 
-      const topics = [Object.values(EVENT_TOPICS), ['*']];
+      const topicsList = Object.values(EVENT_TOPICS);
       let cursor;
       let hasMore = true;
 
       while (hasMore) {
-        const params = {
-          startLedger: cursor ? undefined : this.lastSeenLedger,
-          filters: [{
+        const filters = [];
+        for (let i = 0; i < topicsList.length; i += 4) {
+          filters.push({
             type: 'contract',
             contractIds: [this.contractId],
-            topics,
-          }],
+            topics: [topicsList.slice(i, i + 4), ['*']],
+          });
+        }
+
+        const params = {
+          startLedger: cursor ? undefined : this.lastSeenLedger,
+          filters,
           limit: 100,
         };
 

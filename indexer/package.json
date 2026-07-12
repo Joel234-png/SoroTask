@@ -13,9 +13,11 @@
   "dependencies": {
     "@stellar/stellar-sdk": "^15.0.1",
     "apollo-server-express": "^3.13.0",
-    "cors": "^2.8.5",
-    "express": "^4.21.2",
-    "jsonwebtoken": "^9.0.2",
+    "cors": "^2.8.6",
+    "express": "^5.2.1",
+    "graphql": "^15.10.2",
+    "jsonwebtoken": "^9.0.3",
+    "node-addon-api": "^8.9.0",
     "sqlite3": "^6.0.1"
   },
   "devDependencies": {

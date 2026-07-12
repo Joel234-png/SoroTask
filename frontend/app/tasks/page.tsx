@@ -6,15 +6,20 @@ import { useLayoutStore } from "@/src/store/layoutStore";
 import SplitPaneLayout from "@/src/components/layout/SplitPaneLayout";
 import TaskCardWithSelection from "@/components/TaskCardWithSelection";
 import type { TaskFilters } from "@/src/lib/query/keys";
+import { createPerformanceMonitor, afterNextPaint } from "@/src/lib/frontend-performance";
 
 const TASKS_PER_PAGE = 10;
+const monitor = createPerformanceMonitor({ route: "/tasks" });
 
 function TasksPageContent() {
   const [filters, setFilters] = useState<TaskFilters>({});
   const [currentPage, setCurrentPage] = useState(1);
+  const [savedTemplates, setSavedTemplates] = useState<any[]>([]);
   const { data: tasks, isLoading } = useTasks(filters);
   const { listScrollPosition, saveListScrollPosition } = useLayoutStore();
   const listRef = useRef<HTMLDivElement>(null);
+  const finishRouteLoad = useRef(monitor.start("route_load"));
+
   const totalTasks = tasks?.length ?? 0;
   const totalPages = Math.max(1, Math.ceil(totalTasks / TASKS_PER_PAGE));
   const pageStart = totalTasks === 0 ? 0 : (currentPage - 1) * TASKS_PER_PAGE + 1;
@@ -28,8 +33,19 @@ function TasksPageContent() {
 
   // Restore scroll position on mount
   useEffect(() => {
+    afterNextPaint(() => finishRouteLoad.current());
     if (listRef.current && listScrollPosition > 0) {
       listRef.current.scrollTop = listScrollPosition;
+    }
+    
+    // Load saved templates
+    try {
+      const stored = window.localStorage.getItem('sorotask.templates');
+      if (stored) {
+        setSavedTemplates(JSON.parse(stored));
+      }
+    } catch (e) {
+      console.error("Failed to parse templates from local storage", e);
     }
   }, [listScrollPosition]);
 
@@ -41,8 +57,10 @@ function TasksPageContent() {
   };
 
   const updateFilters = (updater: (filters: TaskFilters) => TaskFilters) => {
+    const endMeasure = monitor.start("task_search");
     setCurrentPage(1);
     setFilters(updater);
+    afterNextPaint(() => endMeasure());
   };
 
   const goToPage = (page: number) => {
@@ -107,6 +125,27 @@ function TasksPageContent() {
           onScroll={handleScroll}
           className="flex-1 overflow-y-auto px-6 py-6"
         >
+          {savedTemplates.length > 0 && (
+            <div className="mb-8">
+              <h2 className="text-xl font-bold text-neutral-200 mb-4">Saved Templates</h2>
+              <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
+                {savedTemplates.map((template, idx) => (
+                  <div key={idx} className="bg-neutral-900 border border-neutral-700 rounded-xl p-4 flex flex-col gap-2">
+                    <h3 className="font-semibold text-emerald-400">{template.name}</h3>
+                    <p className="text-sm text-neutral-400 truncate">
+                      {template.description || "No description provided."}
+                    </p>
+                    <div className="mt-2 text-xs text-neutral-500">
+                      {template.blocks?.length || 0} action block(s)
+                    </div>
+                  </div>
+                ))}
+              </div>
+            </div>
+          )}
+
+          <h2 className="text-xl font-bold text-neutral-200 mb-4">Active Tasks</h2>
+
           {isLoading && (
             <div className="space-y-4">
               {[...Array(5)].map((_, i) => (

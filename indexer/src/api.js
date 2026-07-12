@@ -8,7 +8,6 @@ const { createContext } = require('./graphql/auth');
 async function startApiServer(port = 4000) {
   const app = express();
   app.use(cors());
-  app.use(express.json());
 
   const server = new ApolloServer({
     typeDefs,

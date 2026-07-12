@@ -12,8 +12,7 @@ services:
       - ./keeper/data:/app/data
     ports:
       # Expose the health / metrics HTTP server.
-      # Override METRICS_PORT in .env and update the mapping here if needed.
-      - "3000:3000"
+      - "3001:3000"
     restart: unless-stopped
     healthcheck:
       # Uses wget (available in Alpine) to probe the /health endpoint.
@@ -42,4 +41,14 @@ services:
       # In a real deployment replace with: supervisorctl restart keeper
       RESTART_CMD: "wget -qO- --post-data='' http://keeper:3000/health || true"
     entrypoint: ["sh", "/sidecar/health-check-sidecar.sh"]
+    restart: unless-stopped
+
+  indexer:
+    build:
+      context: ./indexer
+      dockerfile: Dockerfile
+    ports:
+      - "4000:4000"
+    volumes:
+      - ./indexer/indexer.db:/app/indexer.db
     restart: unless-stopped

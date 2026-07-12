@@ -91,8 +91,13 @@ export function useAccessibilityCompliance() {
 
 export function AccessibilityComplianceStatus() {
   const { lastReport } = useAccessibilityCompliance();
+  const [mounted, setMounted] = useState(false);
 
-  if (!lastReport || process.env.NODE_ENV === 'production') {
+  useEffect(() => {
+    setMounted(true);
+  }, []);
+
+  if (!mounted || !lastReport || process.env.NODE_ENV === 'production') {
     return null;
   }
 

@@ -90,7 +90,7 @@ export function WidgetGrid({
   widgetRegistry,
   storageKey = STORAGE_KEY_DEFAULT,
 }: WidgetGridProps) {
-  const defaultOrder = Object.keys(widgetRegistry);
+  const defaultOrder = useMemo(() => Object.keys(widgetRegistry), [widgetRegistry]);
   const [order, setOrder] = useState<string[]>(defaultOrder);
   const [hiddenIds, setHiddenIds] = useState<string[]>([]);
   const [draggingId, setDraggingId] = useState<string | null>(null);

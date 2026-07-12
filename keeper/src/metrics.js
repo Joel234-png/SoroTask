@@ -642,14 +642,19 @@ class Metrics {
         executionTimelinessRate: this.gauges.executionTimelinessSloRate,
         thresholds: { ...this.sloThresholds },
       },
-      rpcCircuitState: this.gauges.rpcCircuitState === 2
-        ? 'OPEN'
-        : (this.gauges.rpcCircuitState === 1 ? 'HALF_OPEN' : 'CLOSED'),
       paused: this.adminState.paused,
       pauseReason: this.adminState.reason,
       shard: { ...this.shardState },
       healthIssues,
     };
+  }
+
+  updateFraudState(state) {
+    Object.assign(this.fraudState, state);
+  }
+
+  updateReconciliationState(state) {
+    Object.assign(this.reconciliationState, state);
   }
 }
 
@@ -761,6 +766,26 @@ class MetricsServer {
 
   setFailoverStateProvider(provider) {
     this.failoverStateProvider = provider;
+  }
+
+  setStreamHub(hub) {
+    this.streamHub = hub;
+  }
+
+  setApiGateway(gateway) {
+    this.apiGateway = gateway;
+  }
+
+  setFailurePredictor(predictor) {
+    this.failurePredictor = predictor;
+  }
+
+  setReputationScorer(scorer) {
+    this.reputationScorer = scorer;
+  }
+
+  setReconciliationEngine(engine) {
+    this.reconciliationEngine = engine;
   }
 
   initPrometheusMetrics() {

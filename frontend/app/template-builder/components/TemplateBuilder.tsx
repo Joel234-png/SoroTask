@@ -90,6 +90,16 @@ export function TemplateBuilder({ onSubmit }: TemplateBuilderProps) {
     }
     setSubmitError('');
     const template = buildTemplate();
+    
+    // Save to localStorage
+    try {
+      const existing = JSON.parse(window.localStorage.getItem('sorotask.templates') || '[]');
+      existing.push(template);
+      window.localStorage.setItem('sorotask.templates', JSON.stringify(existing));
+    } catch (e) {
+      console.error("Failed to save template", e);
+    }
+
     setSubmitted(true);
     onSubmit?.(template);
   }

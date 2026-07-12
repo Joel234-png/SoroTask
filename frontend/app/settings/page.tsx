@@ -6,6 +6,7 @@ import { useEffect, useState } from "react";
 import { useOnboarding } from "@/src/components/onboarding/OnboardingProvider";
 import { HardwareWalletPanel } from "@/src/components/wallet/HardwareWalletPanel";
 import { TxBatchRegistration } from "@/src/components/wallet/TxBatchRegistration";
+import { OptimizedMedia } from "@/src/components/optimized-media";
 
 interface ProviderConfig {
   name: string;
@@ -151,8 +152,13 @@ export default function SettingsPage() {
     );
   }
 
+  useEffect(() => {
+    if (status === "unauthenticated") {
+      router.push("/auth/signin?callbackUrl=/settings");
+    }
+  }, [status, router]);
+
   if (!session) {
-    router.push("/auth/signin?callbackUrl=/settings");
     return null;
   }
 
@@ -257,10 +263,14 @@ export default function SettingsPage() {
           <h2 className="text-xl font-semibold mb-4">Profile Information</h2>
           <div className="flex items-center gap-4 mb-6">
             {session.user.image ? (
-              <img
+              <OptimizedMedia
                 src={session.user.image}
                 alt={session.user.name || "User"}
-                className="w-16 h-16 rounded-full"
+                width={64}
+                height={64}
+                sizes="64px"
+                rounded="full"
+                fallbackLabel={session.user.name?.[0] || "U"}
               />
             ) : (
               <div className="w-16 h-16 bg-blue-500 rounded-full flex items-center justify-center text-2xl font-bold">

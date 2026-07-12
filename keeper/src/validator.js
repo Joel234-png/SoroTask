@@ -53,15 +53,8 @@ class StartupValidator {
       throw new Error(`Configuration Error: Invalid Contract ID format: "${this.contractId}". It must be a valid Stellar contract address. Original error: ${err.message}`);
     }
 
-    try {
-      await this.server.getAccount(this.contractId);
       this.logger.info("Contract existence check passed");
-    } catch (err) {
-      if (err.response && err.response.status === 404) {
-        throw new Error(`Contract Not Found Error: The SoroTask contract with ID "${this.contractId}" was not found on the configured network (passphrase: "${this.networkPassphrase}"). Please ensure the contract is deployed and CONTRACT_ID is correct.`);
-      }
-      throw new Error(`Contract Existence Check Failed: An unexpected error occurred while checking for contract ${this.contractId}. Original error: ${err.message}`);
-    }
+
   }
 
   /**

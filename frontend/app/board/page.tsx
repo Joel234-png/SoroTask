@@ -4,13 +4,18 @@ import { useEffect, useRef, Suspense } from "react";
 import { useLayoutStore } from "@/src/store/layoutStore";
 import SplitPaneLayout from "@/src/components/layout/SplitPaneLayout";
 import Board from "@/components/board/Board";
+import { createPerformanceMonitor, afterNextPaint } from "@/src/lib/frontend-performance";
+
+const monitor = createPerformanceMonitor({ route: "/board" });
 
 function BoardPageContent() {
   const { boardScrollPositions, saveBoardScrollPosition } = useLayoutStore();
   const boardRef = useRef<HTMLDivElement>(null);
+  const finishRouteLoad = useRef(monitor.start("route_load"));
 
   // Restore scroll positions for board columns
   useEffect(() => {
+    afterNextPaint(() => finishRouteLoad.current());
     if (boardRef.current) {
       const columns = boardRef.current.querySelectorAll('[data-column-id]');
       columns.forEach((column) => {

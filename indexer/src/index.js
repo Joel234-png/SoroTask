@@ -1,4 +1,4 @@
-const { SorobanRpc, xdr, scValToNative, nativeToScVal, Address, Contract } = require("@stellar/stellar-sdk");
+const { rpc: SorobanRpc, xdr, scValToNative, nativeToScVal, Address, Contract } = require("@stellar/stellar-sdk");
 const sqlite3 = require("sqlite3").verbose();
 const {
   buildRepairPlan,
@@ -6,10 +6,11 @@ const {
   mapOnChainTask,
 } = require("./reconciliation");
 const { runStaleTaskCleanup } = require("./staleTasks");
+const { startApiServer } = require("./api");
 
 // Configuration
 const RPC_URL = "https://soroban-testnet.stellar.org"; // Change as needed
-const CONTRACT_ID = "YOUR_CONTRACT_ID"; // Replace with actual contract ID
+const CONTRACT_ID = "CCKANVNJJIKGYU4TYTZBGL5JQVLPW33KQUW6JFHPLKXDLQEZETHOUAMJ"; // Replace with actual contract ID
 const DB_FILE = "./indexer.db";
 const POLL_INTERVAL_MS = 6000; // 6 seconds
 const RECONCILE_INTERVAL_MS = 300000; // 5 minutes
@@ -68,7 +69,7 @@ const db = new sqlite3.Database(DB_FILE, (err) => {
 });
 
 // Helper to store cursor (last processed paging token)
-let cursor = "now"; // Start from now; in production, load from storage
+let cursor = "0"; // Start from 0; will be updated to latest ledger on first poll
 
 // Event handler mapping
 async function handleEvent(event) {
@@ -151,11 +152,27 @@ async function handleEvent(event) {
 // Fetch on-chain task state
 async function fetchOnChainTask(taskId) {
   try {
-    const account = await rpc.getAccount(CONTRACT_ID);
-    const result = await rpc.simulateTransaction(
-      contract.call("get_task", nativeToScVal(taskId, { type: "u64" })),
-      { sourceAccount: account }
-    );
+    const { Keypair, TransactionBuilder, Networks, Operation } = require("@stellar/stellar-sdk");
+    const source = Keypair.random();
+    const account = new (require("@stellar/stellar-sdk").Account)(source.publicKey(), "0");
+
+    let operation;
+    if (typeof contract.call === 'function') {
+      operation = contract.call("get_task", nativeToScVal(taskId, { type: "u64" }));
+    } else {
+      operation = Operation.invokeContract({
+        contract: CONTRACT_ID,
+        function: "get_task",
+        args: [nativeToScVal(taskId, { type: "u64" })]
+      });
+    }
+
+    const tx = new TransactionBuilder(account, {
+      fee: "100",
+      networkPassphrase: Networks.TESTNET,
+    }).addOperation(operation).setTimeout(30).build();
+
+    const result = await rpc.simulateTransaction(tx);
 
     if (result.error) {
       console.error(`Error simulating get_task for task ${taskId}:`, result.error);
@@ -340,15 +357,22 @@ async function reconcileAll() {
 // Polling loop
 async function poll() {
   try {
+    let startLedgerToUse = cursor;
+    if (cursor === "now" || cursor === "0" || Number(cursor) === 0) {
+      const latest = await rpc.getLatestLedger();
+      startLedgerToUse = latest.sequence;
+      cursor = startLedgerToUse.toString(); // Initialize cursor
+    }
+
     const response = await rpc.getEvents({
-      startLedger: cursor === "now" ? undefined : cursor,
+      startLedger: Number(startLedgerToUse),
       filters: [{ type: "contract", contractIds: [CONTRACT_ID] }],
       limit: 200,
     });
 
     for (const event of response.events) {
       await handleEvent(event);
-      cursor = event.pagingToken; // Update cursor to the last event's paging token
+      cursor = event.ledger.toString(); // Update cursor to the last event's ledger
     }
 
     // In production, persist cursor to storage (e.g., file, database) here
@@ -421,6 +445,7 @@ Options:
 if (!handleCLI()) {
   // Start polling
   console.log("Starting event indexer...");
+  startApiServer(4000).catch(console.error);
   setInterval(poll, POLL_INTERVAL_MS);
   poll(); // Initial call
 
