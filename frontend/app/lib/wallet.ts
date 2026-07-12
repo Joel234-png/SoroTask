@@ -162,6 +162,13 @@ export async function connectWallet(): Promise<WalletSession> {
   return { address, network: networkDetails };
 }
 
+const withTimeout = <T>(promise: Promise<T>, ms: number = 3000): Promise<T> => {
+  return Promise.race([
+    promise,
+    new Promise<T>((_, reject) => setTimeout(() => reject(new Error(`Timeout after ${ms}ms`)), ms))
+  ]);
+};
+
 /**
  * Silently re-hydrates the session if the user has already authorised the app.
  * Returns null if Freighter is not installed, not allowed, or returns no address.
@@ -171,13 +178,13 @@ export async function restoreSession(): Promise<WalletSession | null> {
   if (isE2EMockWalletEnabled()) return null;
   if (typeof window === "undefined") return null;
   try {
-    const allowed = await isAppAllowed();
+    const allowed = await withTimeout(isAppAllowed());
     if (!allowed) return null;
 
-    const addressResult = await getAddress();
+    const addressResult = await withTimeout(getAddress());
     if (addressResult.error || !addressResult.address) return null;
 
-    const networkResult = await getNetworkDetails();
+    const networkResult = await withTimeout(getNetworkDetails());
     if (networkResult.error) return null;
 
     return {
