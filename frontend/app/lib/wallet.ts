@@ -136,7 +136,17 @@ export async function connectWallet(): Promise<WalletSession> {
   }
 
   // 3. Fetch network details
-  const networkResult = await getNetworkDetails();
+  // Add a small delay to prevent race conditions in the Freighter extension's internal state
+  await new Promise((resolve) => setTimeout(resolve, 500));
+  
+  let networkResult = await getNetworkDetails();
+  
+  // Retry once if it fails, just in case Freighter's message port isn't fully ready
+  if (networkResult.error) {
+    await new Promise((resolve) => setTimeout(resolve, 500));
+    networkResult = await getNetworkDetails();
+  }
+
   if (networkResult.error) {
     throw new WalletConnectionError(
       "UNKNOWN",
