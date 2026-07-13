@@ -15,6 +15,12 @@ services:
         value: "Test SDF Future Network ; October 2022"
       - key: RPC_URL
         value: "https://rpc-futurenet.stellar.org"
+      - key: SOROBAN_RPC_URL
+        value: "https://rpc-futurenet.stellar.org"
+      - key: CONTRACT_ID
+        value: "CCKANVNJJIKGYU4TYTZBGL5JQVLPW33KQUW6JFHPLKXDLQEZETHOUAMJ"
+      - key: POLLING_INTERVAL_MS
+        value: "10000"
 
   - type: web
     name: sorotask-indexer
