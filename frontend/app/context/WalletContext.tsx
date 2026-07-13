@@ -190,6 +190,10 @@ export function WalletProvider({ children }: { children: React.ReactNode }) {
     setErrorCode(null);
     setErrorMessage(null);
     setStatus("disconnected");
+    
+    if (typeof window !== "undefined") {
+      localStorage.setItem("sorotask_wallet_disconnected", "true");
+    }
   }, []);
 
   const clearError = useCallback(() => {

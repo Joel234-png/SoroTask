@@ -109,6 +109,11 @@ export async function connectWallet(): Promise<WalletSession> {
     return getE2EMockSession();
   }
 
+  // Clear the intentional disconnect flag so they can connect again
+  if (typeof window !== "undefined") {
+    localStorage.removeItem("sorotask_wallet_disconnected");
+  }
+
   // 1. Check extension is installed
   const installed = await isFreighterInstalled();
   if (!installed) {
@@ -187,6 +192,12 @@ const withTimeout = <T>(promise: Promise<T>, ms: number = 3000): Promise<T> => {
 export async function restoreSession(): Promise<WalletSession | null> {
   if (isE2EMockWalletEnabled()) return null;
   if (typeof window === "undefined") return null;
+  
+  // If the user explicitly disconnected, do not auto-rehydrate.
+  if (localStorage.getItem("sorotask_wallet_disconnected") === "true") {
+    return null;
+  }
+
   try {
     const allowed = await withTimeout(isAppAllowed());
     if (!allowed) return null;
