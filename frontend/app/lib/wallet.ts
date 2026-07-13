@@ -208,6 +208,11 @@ export async function restoreSession(): Promise<WalletSession | null> {
     const networkResult = await withTimeout(getNetworkDetails());
     if (networkResult.error) return null;
 
+    // Enforce Futurenet on page reload
+    if (networkResult.networkPassphrase !== EXPECTED_NETWORK_PASSPHRASE) {
+      return null;
+    }
+
     return {
       address: addressResult.address,
       network: {
@@ -240,7 +245,8 @@ export function watchWalletChanges(
   const watcher = new WatchWalletChanges(pollMs);
 
   watcher.watch(({ address, network, networkPassphrase }) => {
-    if (!address) {
+    // If no address or wrong network, disconnect immediately
+    if (!address || networkPassphrase !== EXPECTED_NETWORK_PASSPHRASE) {
       onUpdate(null);
       return;
     }
