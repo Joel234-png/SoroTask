@@ -206,11 +206,30 @@ export function WalletConnectionModal({ open, onClose }: WalletConnectionModalPr
                     ? "Wrong network"
                     : "Unable to connect"}
               </p>
-              <p className="mt-1 text-sm text-red-200/80">
-                {errorCode === "WRONG_NETWORK"
-                  ? "Switch to Futurenet in Freighter, then try again."
-                  : errorMessage}
-              </p>
+              <div className="mt-2 text-sm text-red-200/90 space-y-3">
+                {errorCode === "WRONG_NETWORK" ? (
+                  <>
+                    <p>Switch to <strong>Futurenet</strong> in Freighter, then try again.</p>
+                    <div className="rounded border border-red-500/20 bg-red-950/30 p-3 mt-3 text-xs leading-relaxed space-y-2">
+                      <p className="font-semibold text-red-200">Can't find Futurenet?</p>
+                      <ol className="list-decimal pl-4 space-y-1">
+                        <li>Open Freighter Settings (⚙️) ➝ Preferences</li>
+                        <li>Turn on <strong>"Developer Mode"</strong> or <strong>"Show Test Networks"</strong></li>
+                        <li>Go to <strong>Network</strong> ➝ <strong>Add Custom Network</strong></li>
+                      </ol>
+                      <ul className="pl-1 pt-1 space-y-1 text-red-200/80">
+                        <li><span className="font-medium text-red-200">Name:</span> Futurenet</li>
+                        <li><span className="font-medium text-red-200">RPC URL:</span> https://rpc-futurenet.stellar.org</li>
+                        <li><span className="font-medium text-red-200">Horizon URL:</span> https://horizon-futurenet.stellar.org</li>
+                        <li><span className="font-medium text-red-200">Passphrase:</span> Test SDF Future Network ; October 2022</li>
+                        <li><span className="font-medium text-red-200">Friendbot URL:</span> https://friendbot-futurenet.stellar.org/</li>
+                      </ul>
+                    </div>
+                  </>
+                ) : (
+                  <p>{errorMessage}</p>
+                )}
+              </div>
             </div>
           </div>
         )}
