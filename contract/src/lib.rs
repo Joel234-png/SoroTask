@@ -615,7 +615,18 @@ pub struct ZkCondition {
 }
 
 #[contracttype]
+#[derive(Clone, Debug)]
+pub struct EmergencyPauseState {
+    pub is_paused: bool,
+    pub paused_at: u64,
+    pub pause_duration: u64,
+}
+
+#[contracttype]
 pub enum DataKey {
+    Guardians,
+    PauseSignatures,
+    EmergencyPauseState,
     Task(u64),
     Counter,
     ActiveTasks,
@@ -1076,6 +1087,158 @@ pub struct SoroTaskContract;
 
 #[contractimpl]
 impl SoroTaskContract {
+    pub fn set_guardians(env: Env, guardians: Vec<Address>) {
+        if let Some(admin) = env
+            .storage()
+            .persistent()
+            .get::<DataKey, Address>(&DataKey::AdminAddress)
+        {
+            admin.require_auth();
+        }
+        env.storage()
+            .persistent()
+            .set(&DataKey::Guardians, &guardians);
+    }
+
+    pub fn get_guardians(env: Env) -> Vec<Address> {
+        env.storage()
+            .persistent()
+            .get(&DataKey::Guardians)
+            .unwrap_or_else(|| Vec::new(&env))
+    }
+
+    pub fn emergency_pause(env: Env, guardian: Address) -> bool {
+        guardian.require_auth();
+        let guardians: Vec<Address> = env
+            .storage()
+            .persistent()
+            .get(&DataKey::Guardians)
+            .unwrap_or_else(|| Vec::new(&env));
+
+        let mut is_guardian = false;
+        let mut i = 0;
+        while i < guardians.len() {
+            if guardians.get(i).unwrap() == guardian {
+                is_guardian = true;
+                break;
+            }
+            i += 1;
+        }
+
+        if !is_guardian {
+            panic_with_error!(&env, Error::Unauthorized);
+        }
+
+        let mut sigs: Vec<Address> = env
+            .storage()
+            .persistent()
+            .get(&DataKey::PauseSignatures)
+            .unwrap_or_else(|| Vec::new(&env));
+
+        let mut already_signed = false;
+        let mut j = 0;
+        while j < sigs.len() {
+            if sigs.get(j).unwrap() == guardian {
+                already_signed = true;
+                break;
+            }
+            j += 1;
+        }
+
+        if !already_signed {
+            sigs.push_back(guardian);
+            env.storage()
+                .persistent()
+                .set(&DataKey::PauseSignatures, &sigs);
+        }
+
+        if sigs.len() >= 3 {
+            let state = EmergencyPauseState {
+                is_paused: true,
+                paused_at: env.ledger().timestamp(),
+                pause_duration: 86400,
+            };
+            env.storage()
+                .persistent()
+                .set(&DataKey::EmergencyPauseState, &state);
+            true
+        } else {
+            false
+        }
+    }
+
+    pub fn is_protocol_paused(env: Env) -> bool {
+        if let Some(mut state) = env
+            .storage()
+            .persistent()
+            .get::<DataKey, EmergencyPauseState>(&DataKey::EmergencyPauseState)
+        {
+            if state.is_paused {
+                if env
+                    .ledger()
+                    .timestamp()
+                    >= state.paused_at.saturating_add(state.pause_duration)
+                {
+                    state.is_paused = false;
+                    env.storage()
+                        .persistent()
+                        .set(&DataKey::EmergencyPauseState, &state);
+                    let empty_sigs: Vec<Address> = Vec::new(&env);
+                    env.storage()
+                        .persistent()
+                        .set(&DataKey::PauseSignatures, &empty_sigs);
+                    return false;
+                }
+                return true;
+            }
+        }
+        false
+    }
+
+    pub fn unpause_protocol(env: Env) {
+        if let Some(admin) = env
+            .storage()
+            .persistent()
+            .get::<DataKey, Address>(&DataKey::AdminAddress)
+        {
+            admin.require_auth();
+        }
+        let state = EmergencyPauseState {
+            is_paused: false,
+            paused_at: 0,
+            pause_duration: 86400,
+        };
+        env.storage()
+            .persistent()
+            .set(&DataKey::EmergencyPauseState, &state);
+        let empty_sigs: Vec<Address> = Vec::new(&env);
+        env.storage()
+            .persistent()
+            .set(&DataKey::PauseSignatures, &empty_sigs);
+    }
+
+    pub fn extend_emergency_pause(env: Env, additional_seconds: u64) {
+        if let Some(admin) = env
+            .storage()
+            .persistent()
+            .get::<DataKey, Address>(&DataKey::AdminAddress)
+        {
+            admin.require_auth();
+        }
+        if let Some(mut state) = env
+            .storage()
+            .persistent()
+            .get::<DataKey, EmergencyPauseState>(&DataKey::EmergencyPauseState)
+        {
+            if state.is_paused {
+                state.pause_duration = state.pause_duration.saturating_add(additional_seconds);
+                env.storage()
+                    .persistent()
+                    .set(&DataKey::EmergencyPauseState, &state);
+            }
+        }
+    }
+
     /// Validates task payload arguments for size and structure.
     /// Returns Ok(()) if valid, or an error code if validation fails.
     fn validate_args(args: &Vec<Val>) -> Result<(), Error> {
@@ -2084,6 +2247,9 @@ impl SoroTaskContract {
     /// cross-contract call returns, guaranteeing it only reflects completed
     /// executions.
     fn execute_internal(env: &Env, keeper: &Address, task_id: u64, skip_auth: bool) {
+        if Self::is_protocol_paused(env.clone()) {
+            panic_with_error!(env, Error::TaskPaused);
+        }
         use events::{ExecutionStep, StepResult};
 
         let mut trace_steps: Vec<events::ExecutionStepRecord> = Vec::new(env);
@@ -7461,6 +7627,51 @@ pub(crate) mod tests {
         // Verify settlement was processed
         // In production, this would check for settlement events and updated state
         // For now, we verify the function call succeeded
+    }
+
+    #[test]
+    fn test_emergency_pause_multisig_and_auto_unpause() {
+        let env = Env::default();
+        env.mock_all_auths();
+
+        let contract_id = env.register(SoroTaskContract, ());
+        let client = SoroTaskContractClient::new(&env, &contract_id);
+
+        let g1 = Address::generate(&env);
+        let g2 = Address::generate(&env);
+        let g3 = Address::generate(&env);
+        let g4 = Address::generate(&env);
+        let g5 = Address::generate(&env);
+
+        let mut guardians = Vec::new(&env);
+        guardians.push_back(g1.clone());
+        guardians.push_back(g2.clone());
+        guardians.push_back(g3.clone());
+        guardians.push_back(g4.clone());
+        guardians.push_back(g5.clone());
+
+        client.set_guardians(&guardians);
+
+        assert!(!client.is_protocol_paused());
+
+        // Guardian 1 signature
+        let paused1 = client.emergency_pause(&g1);
+        assert!(!paused1);
+        assert!(!client.is_protocol_paused());
+
+        // Guardian 2 signature
+        let paused2 = client.emergency_pause(&g2);
+        assert!(!paused2);
+        assert!(!client.is_protocol_paused());
+
+        // Guardian 3 signature -> 3-of-5 threshold reached!
+        let paused3 = client.emergency_pause(&g3);
+        assert!(paused3);
+        assert!(client.is_protocol_paused());
+
+        // Advance ledger timestamp by 24h + 1s to test automatic safety unpause
+        env.ledger().with_mut(|l| l.timestamp += 86401);
+        assert!(!client.is_protocol_paused());
     }
 }
 
