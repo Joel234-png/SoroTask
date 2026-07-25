@@ -11,6 +11,8 @@ const { recordEventIndexed, updateLedgerMetrics } = require("./metrics");
 const { HighAvailabilityManager, ROLES } = require("./ha");
 const { CacheInvalidationEngine } = require("./cacheInvalidator");
 const { ParallelLedgerParser } = require("./parallelParser");
+const { LedgerGapDetector } = require("./ledgerGapDetector");
+const { SyntheticMonitor } = require("./syntheticMonitor");
 
 // Configuration
 const RPC_URL = "https://soroban-testnet.stellar.org"; // Change as needed
@@ -74,6 +76,21 @@ const db = new sqlite3.Database(DB_FILE, (err) => {
 
 // Helper to store cursor (last processed paging token)
 let cursor = "0"; // Start from 0; will be updated to latest ledger on first poll
+
+// Cache invalidation engine (no Redis by default; swap in a real client via env)
+const cacheInvalidator = new CacheInvalidationEngine();
+
+// Ledger gap detector — invalidates cache whenever sequence continuity breaks
+const gapDetector = new LedgerGapDetector({
+  cacheInvalidator,
+  maxAllowedGap: 1,
+  onGap: (info) => {
+    console.warn(
+      `[GapDetector] Ledger gap of ${info.gapSize} detected (${info.from} → ${info.to}). ` +
+      `Cache flushed to prevent stale reads.`
+    );
+  },
+});
 
 // Event handler mapping
 async function handleEvent(event) {
@@ -151,9 +168,7 @@ async function handleEvent(event) {
   // After storing event, reconcile this task to ensure state is correct
   if (taskId) {
     await reconcileTask(taskId);
-    if (typeof cacheInvalidator !== 'undefined' && cacheInvalidator) {
-      cacheInvalidator.invalidateForEvent(name, taskId, JSON.parse(dataJson || '{}'));
-    }
+    cacheInvalidator.invalidateForEvent(name, taskId, JSON.parse(dataJson || '{}'));
   }
 }
 
@@ -384,6 +399,9 @@ async function poll() {
 
     for (const event of response.events) {
       await handleEvent(event);
+      const ledgerSeq = Number(event.ledgerSequence ?? event.ledger);
+      // Detect and handle ledger sequence gaps before advancing the cursor
+      gapDetector.record(ledgerSeq);
       cursor = event.ledger.toString(); // Update cursor to the last event's ledger
       updateLedgerMetrics(Number(cursor), Number(networkHead));
     }
@@ -465,6 +483,18 @@ if (!handleCLI()) {
   // Start periodic reconciliation
   console.log("Starting periodic reconciliation (every 5 minutes)...");
   setInterval(reconcileAll, RECONCILE_INTERVAL_MS);
+
+  // Start synthetic transaction monitoring for end-to-end ingestion health
+  const syntheticMonitor = new SyntheticMonitor({
+    db,
+    rpc,
+    contractId: CONTRACT_ID,
+    intervalMs: Number(process.env.SYNTHETIC_INTERVAL_MS || 60_000),
+    latencyThresholdMs: Number(process.env.SYNTHETIC_LATENCY_THRESHOLD_MS || 30_000),
+    timeoutMs: Number(process.env.SYNTHETIC_TIMEOUT_MS || 120_000),
+    webhookUrl: process.env.SYNTHETIC_MONITOR_WEBHOOK_URL || null,
+  });
+  syntheticMonitor.start();
 
   console.log("Starting stale task cleanup dry-run (every 24 hours)...");
   setInterval(() => {
