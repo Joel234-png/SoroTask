@@ -1,4 +1,5 @@
 const express = require('express');
+const rateLimit = require('express-rate-limit');
 const { ZKProofService } = require('./index');
 const { hashTaskCondition, serializeProof, checkConstraint } = require('./lib/helpers');
 
@@ -47,6 +48,22 @@ function validateVerifyRequest(body) {
  * @param {ZKProofService} zkService
  * @param {{ apiToken?: string, version?: string, startTime?: number }} [options]
  */
+/**
+ * Creates an express-rate-limit store instance.
+ * By default uses the built-in MemoryStore.  In production, replace with a
+ * Redis-backed store (e.g. rate-limit-redis) to share state across replicas:
+ *
+ *   const RedisStore = require('rate-limit-redis');
+ *   const store = new RedisStore({ client: redisClient });
+ *   createApp(zkService, { rateLimitStore: store });
+ *
+ * @param {object} [store] - Optional rate-limit store instance.
+ * @returns {import('express-rate-limit').Store}
+ */
+function createRateLimitStore(store) {
+  return store ?? undefined; // undefined lets express-rate-limit use MemoryStore
+}
+
 function createApp(zkService, options = {}) {
   const app = express();
   const apiToken = options.apiToken ?? process.env.ZK_PROOF_API_TOKEN;
@@ -54,6 +71,29 @@ function createApp(zkService, options = {}) {
   const startTime = options.startTime ?? Date.now();
 
   app.use(express.json({ limit: '1mb' }));
+
+  // ---------------------------------------------------------------------------
+  // Rate limiting – /generate-proof: 15 requests per minute per IP address.
+  // On breach: HTTP 429 Too Many Requests + Retry-After header.
+  // ---------------------------------------------------------------------------
+  const generateProofLimiter = rateLimit({
+    windowMs: 60 * 1000, // 1-minute sliding window
+    max: 15,             // 15 proof requests per window per IP
+    standardHeaders: true,  // Emit RateLimit-* headers (draft-6)
+    legacyHeaders: false,
+    store: createRateLimitStore(options.rateLimitStore),
+    keyGenerator: (req) => req.ip,
+    handler: (_req, res) => {
+      const retryAfter = Math.ceil(60); // seconds until window resets
+      res.setHeader('Retry-After', retryAfter);
+      sendError(
+        res,
+        429,
+        'RATE_LIMIT_EXCEEDED',
+        'Too many proof requests. Please retry after ' + retryAfter + ' seconds.',
+      );
+    },
+  });
 
   function authenticate(req, res, next) {
     if (!apiToken) return next();
@@ -79,7 +119,7 @@ function createApp(zkService, options = {}) {
     });
   });
 
-  app.post('/generate-proof', authenticate, async (req, res) => {
+  app.post('/generate-proof', generateProofLimiter, authenticate, async (req, res) => {
     const startedAt = Date.now();
     const validation = validateGenerateRequest(req.body || {});
     if (!validation.valid) {
@@ -201,4 +241,4 @@ if (require.main === module) {
   });
 }
 
-module.exports = { createApp, createServer };
+module.exports = { createApp, createServer, createRateLimitStore };
