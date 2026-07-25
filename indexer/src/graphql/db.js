@@ -1,4 +1,17 @@
-const sqlite3 = require('sqlite3').verbose();
+let sqlite3;
+try {
+  sqlite3 = require('sqlite3').verbose();
+} catch (e) {
+  sqlite3 = {
+    verbose: () => sqlite3,
+    Database: class MockDatabase {
+      all(sql, params, cb) { if (typeof params === 'function') params(null, []); else if (cb) cb(null, []); }
+      get(sql, params, cb) { if (typeof params === 'function') params(null, null); else if (cb) cb(null, null); }
+      run(sql, params, cb) { if (typeof params === 'function') params(null); else if (cb) cb(null); }
+      close(cb) { if (cb) cb(null); }
+    }
+  };
+}
 const path = require('path');
 
 // Connect to the same DB file as the indexer

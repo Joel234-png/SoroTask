@@ -1,7 +1,15 @@
 const express = require('express');
 const rateLimit = require('express-rate-limit');
+const path = require('path');
+const OpenApiValidator = require('express-openapi-validator');
 const { ZKProofService } = require('./index');
-const { hashTaskCondition, serializeProof, checkConstraint } = require('./lib/helpers');
+const {
+  hashTaskCondition,
+  serializeProof,
+  checkConstraint,
+  decryptWitnessECIES,
+  zeroizeBuffer,
+} = require('./lib/helpers');
 
 const SERVICE_VERSION = '1.0.0';
 
@@ -23,8 +31,8 @@ function validateGenerateRequest(body) {
   if (!body.taskCondition.type || body.taskCondition.params == null) {
     return { valid: false, message: 'taskCondition must include type and params' };
   }
-  if (!body.clientData.witness) {
-    return { valid: false, message: 'clientData.witness is required' };
+  if (!body.clientData.witness && !body.clientData.encryptedWitness) {
+    return { valid: false, message: 'clientData.witness or clientData.encryptedWitness is required' };
   }
   return { valid: true };
 }
@@ -46,7 +54,7 @@ function validateVerifyRequest(body) {
 
 /**
  * @param {ZKProofService} zkService
- * @param {{ apiToken?: string, version?: string, startTime?: number }} [options]
+ * @param {{ apiToken?: string, version?: string, startTime?: number, eciesPrivateKey?: string, disableOpenApiValidation?: boolean }} [options]
  */
 /**
  * Creates an express-rate-limit store instance.
@@ -69,6 +77,7 @@ function createApp(zkService, options = {}) {
   const apiToken = options.apiToken ?? process.env.ZK_PROOF_API_TOKEN;
   const version = options.version ?? SERVICE_VERSION;
   const startTime = options.startTime ?? Date.now();
+  const eciesPrivateKey = options.eciesPrivateKey ?? process.env.ECIES_PRIVATE_KEY;
 
   app.use(express.json({ limit: '1mb' }));
 
@@ -94,6 +103,18 @@ function createApp(zkService, options = {}) {
       );
     },
   });
+  // OpenAPI v3 Schema Validation Middleware
+  if (!options.disableOpenApiValidation) {
+    const apiSpec = path.join(__dirname, 'openapi.yaml');
+    app.use(
+      OpenApiValidator.middleware({
+        apiSpec,
+        validateRequests: true,
+        validateResponses: false,
+        ignorePaths: (pathStr) => pathStr === '/health',
+      }),
+    );
+  }
 
   function authenticate(req, res, next) {
     if (!apiToken) return next();
@@ -135,19 +156,35 @@ function createApp(zkService, options = {}) {
       return sendError(res, 503, 'SERVICE_NOT_READY', 'ZK proof worker pool is not initialized');
     }
 
-    const { taskId, circuitId, taskCondition, clientData } = req.body;
-    const constraint = checkConstraint(taskCondition, clientData, circuitId);
-    if (!constraint.ok) {
-      return sendError(
-        res,
-        422,
-        'CONSTRAINT_UNSATISFIED',
-        'Client witness does not satisfy task condition constraints',
-        constraint.details,
-      );
+    let { taskId, circuitId, taskCondition, clientData } = req.body;
+    let witnessBuffer = null;
+
+    // Handle ECIES Encrypted Witness Transport if encryptedWitness is provided
+    if (clientData.encryptedWitness) {
+      if (!eciesPrivateKey) {
+        return sendError(res, 400, 'INVALID_INPUT', 'ECIES private key not configured on server');
+      }
+      try {
+        const decrypted = decryptWitnessECIES(clientData.encryptedWitness, eciesPrivateKey);
+        clientData = { ...clientData, witness: decrypted.witness };
+        witnessBuffer = decrypted.decryptedBuffer;
+      } catch (err) {
+        return sendError(res, 400, 'INVALID_INPUT', `ECIES witness decryption failed: ${err.message}`);
+      }
     }
 
     try {
+      const constraint = checkConstraint(taskCondition, clientData, circuitId);
+      if (!constraint.ok) {
+        return sendError(
+          res,
+          422,
+          'CONSTRAINT_UNSATISFIED',
+          'Client witness does not satisfy task condition constraints',
+          constraint.details,
+        );
+      }
+
       const rawProof = await zkService.generateProof(taskCondition, clientData);
       const conditionHash = hashTaskCondition(taskCondition);
       const proof = {
@@ -175,6 +212,11 @@ function createApp(zkService, options = {}) {
         return sendError(res, 400, 'INVALID_INPUT', error.message);
       }
       return sendError(res, 500, 'PROOF_GENERATION_FAILED', error.message);
+    } finally {
+      // Zero out decrypted witness buffer immediately after proof generation
+      if (witnessBuffer) {
+        zeroizeBuffer(witnessBuffer);
+      }
     }
   });
 
@@ -217,6 +259,120 @@ function createApp(zkService, options = {}) {
       }
       return sendError(res, 500, 'PROOF_VERIFICATION_FAILED', error.message);
     }
+  });
+
+  // OpenAPI Validation Error Handler
+  app.use((err, _req, res, next) => {
+    if (err.status || err.errors) {
+      return sendError(
+        res,
+        err.status || 400,
+        'INVALID_INPUT',
+        err.message || 'Validation error',
+        err.errors || [],
+      );
+    }
+    next(err);
+  app.post('/proofs/async', authenticate, async (req, res) => {
+    const validation = validateGenerateRequest(req.body || {});
+    if (!validation.valid) {
+      if (validation.missingFields) {
+        return sendError(res, 400, 'INVALID_INPUT', 'taskCondition and clientData are required', {
+          missingFields: validation.missingFields,
+        });
+      }
+      return sendError(res, 400, 'INVALID_INPUT', validation.message);
+    }
+
+    if (!zkService.isReady) {
+      return sendError(res, 503, 'SERVICE_NOT_READY', 'ZK proof worker pool is not initialized');
+    }
+
+    const { taskId, circuitId, taskCondition, clientData } = req.body;
+    const constraint = checkConstraint(taskCondition, clientData, circuitId);
+    if (!constraint.ok) {
+      return sendError(
+        res,
+        422,
+        'CONSTRAINT_UNSATISFIED',
+        'Client witness does not satisfy task condition constraints',
+        constraint.details,
+      );
+    }
+
+    try {
+      const asyncJob = zkService.enqueueAsyncJob(taskCondition, clientData);
+      return res.status(202).json({
+        jobId: asyncJob.jobId,
+        status: asyncJob.status,
+        taskId,
+        createdAt: asyncJob.createdAt,
+      });
+    } catch (error) {
+      return sendError(res, 500, 'PROOF_ASYNC_ENQUEUE_FAILED', error.message);
+    }
+  });
+
+  app.get('/proofs/:job_id/stream', (req, res) => {
+    const { job_id: jobId } = req.params;
+
+    res.setHeader('Content-Type', 'text/event-stream');
+    res.setHeader('Cache-Control', 'no-cache');
+    res.setHeader('Connection', 'keep-alive');
+
+    const job = zkService.getAsyncJob(jobId);
+    if (!job) {
+      res.write(`event: error\ndata: ${JSON.stringify({ error: 'Job not found', jobId })}\n\n`);
+      return res.end();
+    }
+
+    res.write(`event: status\ndata: ${JSON.stringify({ jobId: job.jobId, status: job.status, progress: job.progress })}\n\n`);
+
+    if (job.status === 'completed') {
+      res.write(`event: complete\ndata: ${JSON.stringify(job.result)}\n\n`);
+      return res.end();
+    }
+
+    if (job.status === 'failed') {
+      res.write(`event: error\ndata: ${JSON.stringify({ jobId: job.jobId, error: job.error })}\n\n`);
+      return res.end();
+    }
+
+    const onProgress = (data) => {
+      if (data.jobId === jobId) {
+        res.write(`event: progress\ndata: ${JSON.stringify(data)}\n\n`);
+      }
+    };
+
+    const onComplete = (completedJob) => {
+      if (completedJob.jobId === jobId) {
+        res.write(`event: complete\ndata: ${JSON.stringify(completedJob.result)}\n\n`);
+        cleanup();
+        res.end();
+      }
+    };
+
+    const onError = (failedJob) => {
+      if (failedJob.jobId === jobId) {
+        res.write(`event: error\ndata: ${JSON.stringify({ jobId, error: failedJob.error })}\n\n`);
+        cleanup();
+        res.end();
+      }
+    };
+
+    const cleanup = () => {
+      zkService.removeListener('jobProgress', onProgress);
+      zkService.removeListener('jobComplete', onComplete);
+      zkService.removeListener('jobError', onError);
+    };
+
+    zkService.on('jobProgress', onProgress);
+    zkService.on('jobComplete', onComplete);
+    zkService.on('jobError', onError);
+
+    req.on('close', () => {
+      cleanup();
+    });
   });
 
   return app;

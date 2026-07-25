@@ -161,3 +161,25 @@ module.exports = {
   FailurePredictor,
   KeeperReputationScorer,
 };
+class ProfitabilityEstimator {
+  constructor(options = {}) {
+    this.logger = options.logger || createLogger('profit-estimator');
+    this.threshold = options.threshold || 0;
+  }
+
+  estimate(taskBounty, gasConsumed, feeRate) {
+    const netProfit = taskBounty - (gasConsumed * feeRate);
+    return {
+      netProfit,
+      shouldSkip: netProfit < this.threshold,
+    };
+  }
+
+  reevaluateSkippedTasks(skippedTasks, currentGasFeeRate) {
+    return skippedTasks.filter(task => {
+      const estimate = this.estimate(task.bounty, task.estimatedGas, currentGasFeeRate);
+      return !estimate.shouldSkip;
+    });
+  }
+}
+module.exports.ProfitabilityEstimator = ProfitabilityEstimator;

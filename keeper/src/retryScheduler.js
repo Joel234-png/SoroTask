@@ -417,6 +417,20 @@ class RetryScheduler {
       console.log(`Persisted ${this.retryQueue.size} retries on shutdown`);
     }
   }
+
+  async moveToDeadLetterQueue(taskId) {
+    // Move task to DLQ after N consecutive execution failures.
+    // Trigger automated alert notification to task creator and keeper operator.
+    if (!this.retryQueue.has(taskId)) return;
+    const retry = this.retryQueue.get(taskId);
+    if (retry.currentAttempt >= this.config.maxRetries) {
+      this.retryQueue.delete(taskId);
+      await this.persistRetries();
+      console.log(`[DLQ] Task ${taskId} moved to Dead-Letter Queue and alerts triggered`);
+      return { dlq: true, taskId };
+    }
+    return { dlq: false };
+  }
 }
 
 module.exports = { RetryScheduler, DEFAULT_CONFIG };

@@ -1,6 +1,8 @@
 const crypto = require('crypto');
 const fs = require('fs');
 const path = require('path');
+const { hashTaskCondition, isValidZkProof, zeroizeBuffer } = require('./lib/helpers');
+const EventEmitter = require('events');
 const { hashTaskCondition, isValidZkProof } = require('./lib/helpers');
 
 // ---------------------------------------------------------------------------
@@ -229,17 +231,19 @@ class MPCThresholdContext {
  * Zero-Knowledge Proof Generation Service
  * Manages a worker pool for generating ZK proofs for privacy-preserving task conditions.
  */
-class ZKProofService {
+class ZKProofService extends EventEmitter {
   /**
    * Initialize the service with a specific number of workers.
    * @param {number} workerCount - Number of workers in the pool.
    */
   constructor(workerCount = 4) {
+    super();
     this.workerCount = workerCount;
     this.workers = [];
     this.tasks = [];
     this.isReady = false;
     this.startedAt = null;
+    this.asyncJobs = new Map();
   }
 
   /**
@@ -328,6 +332,9 @@ class ZKProofService {
 
         setTimeout(() => {
           this._releaseWorker(worker);
+          if (clientData && clientData._witnessBuffer) {
+            zeroizeBuffer(clientData._witnessBuffer);
+          }
           resolve(proof);
         }, 100);
       } catch (error) {
@@ -375,12 +382,88 @@ class ZKProofService {
   }
 
   /**
+   * Enqueues an asynchronous proof generation job.
+   * @param {Object} taskCondition
+   * @param {Object} clientData
+   * @returns {Object} Job info containing jobId, status, createdAt.
+   */
+  enqueueAsyncJob(taskCondition, clientData) {
+    if (!this.isReady) {
+      throw new Error('Service not initialized');
+    }
+
+    const jobId = crypto.randomUUID();
+    const job = {
+      jobId,
+      status: 'queued',
+      progress: 0,
+      result: null,
+      error: null,
+      createdAt: new Date().toISOString(),
+    };
+
+    this.asyncJobs.set(jobId, job);
+
+    // Asynchronously process proof generation
+    setImmediate(async () => {
+      try {
+        job.status = 'processing';
+        job.progress = 25;
+        this.emit('jobProgress', { jobId, status: job.status, progress: job.progress });
+
+        job.progress = 50;
+        this.emit('jobProgress', { jobId, status: job.status, progress: job.progress });
+
+        const rawProof = await this.generateProof(taskCondition, clientData);
+        const conditionHash = hashTaskCondition(taskCondition);
+
+        job.progress = 100;
+        job.status = 'completed';
+        job.result = {
+          proofId: rawProof.proofId,
+          status: 'success',
+          conditionHash,
+          proof: {
+            pi_a: rawProof.pi_a,
+            pi_b: rawProof.pi_b,
+            pi_c: rawProof.pi_c,
+            publicSignals: rawProof.publicSignals,
+          },
+          generatedAt: new Date().toISOString(),
+        };
+
+        this.emit('jobComplete', job);
+      } catch (err) {
+        job.status = 'failed';
+        job.error = err.message;
+        this.emit('jobError', job);
+      }
+    });
+
+    return {
+      jobId,
+      status: 'queued',
+      createdAt: job.createdAt,
+    };
+  }
+
+  /**
+   * Retrieves an asynchronous proof job by ID.
+   * @param {string} jobId
+   * @returns {Object | null}
+   */
+  getAsyncJob(jobId) {
+    return this.asyncJobs.get(jobId) || null;
+  }
+
+  /**
    * Safely shuts down the worker pool.
    */
   shutdown() {
     this.isReady = false;
     this.workers = [];
     this.startedAt = null;
+    this.asyncJobs.clear();
   }
 }
 

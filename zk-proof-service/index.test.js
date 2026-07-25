@@ -1,5 +1,14 @@
 const { ZKProofService } = require('./index');
-const { hashTaskCondition, serializeProof, isValidZkProof, checkConstraint } = require('./lib/helpers');
+const {
+  hashTaskCondition,
+  serializeProof,
+  isValidZkProof,
+  checkConstraint,
+  generateECIESKeyPair,
+  encryptWitnessECIES,
+  decryptWitnessECIES,
+  zeroizeBuffer,
+} = require('./lib/helpers');
 
 describe('ZKProofService', () => {
   let service;
@@ -123,5 +132,29 @@ describe('helpers', () => {
       'liquidity-threshold-v1',
     );
     expect(result.ok).toBe(false);
+  });
+
+  test('ECIES secp256k1 key generation, encryption, and decryption', () => {
+    const keyPair = generateECIESKeyPair();
+    expect(keyPair).toHaveProperty('publicKey');
+    expect(keyPair).toHaveProperty('privateKey');
+
+    const witnessObj = { secretValue: 987654321, owner: 'GB12345' };
+    const encrypted = encryptWitnessECIES(witnessObj, keyPair.publicKey);
+
+    expect(encrypted).toHaveProperty('ephemeralPublicKey');
+    expect(encrypted).toHaveProperty('iv');
+    expect(encrypted).toHaveProperty('ciphertext');
+    expect(encrypted).toHaveProperty('tag');
+
+    const decrypted = decryptWitnessECIES(encrypted, keyPair.privateKey);
+    expect(decrypted.witness).toEqual(witnessObj);
+  });
+
+  test('zeroizeBuffer scrubs memory buffer to zeros', () => {
+    const buf = Buffer.from('secret-witness-payload-data');
+    expect(buf.toString()).toBe('secret-witness-payload-data');
+    zeroizeBuffer(buf);
+    expect(buf.every((byte) => byte === 0)).toBe(true);
   });
 });
