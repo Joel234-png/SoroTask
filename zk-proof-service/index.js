@@ -1,5 +1,5 @@
 const crypto = require('crypto');
-const { hashTaskCondition, isValidZkProof } = require('./lib/helpers');
+const { hashTaskCondition, isValidZkProof, zeroizeBuffer } = require('./lib/helpers');
 
 /**
  * Zero-Knowledge Proof Generation Service
@@ -104,6 +104,9 @@ class ZKProofService {
 
         setTimeout(() => {
           this._releaseWorker(worker);
+          if (clientData && clientData._witnessBuffer) {
+            zeroizeBuffer(clientData._witnessBuffer);
+          }
           resolve(proof);
         }, 100);
       } catch (error) {

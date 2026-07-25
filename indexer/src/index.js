@@ -7,6 +7,7 @@ const {
 } = require("./reconciliation");
 const { runStaleTaskCleanup } = require("./staleTasks");
 const { startApiServer } = require("./api");
+const { recordEventIndexed, updateLedgerMetrics } = require("./metrics");
 
 // Configuration
 const RPC_URL = "https://soroban-testnet.stellar.org"; // Change as needed
@@ -137,6 +138,7 @@ async function handleEvent(event) {
       if (err) {
         console.error("Error inserting event:", err.message);
       } else {
+        recordEventIndexed(name);
         console.log(`Stored event: ${name} for task ${taskId} at ledger ${event.ledgerSequence}`);
       }
     }
@@ -357,12 +359,16 @@ async function reconcileAll() {
 // Polling loop
 async function poll() {
   try {
+    const latest = await rpc.getLatestLedger();
+    const networkHead = latest.sequence;
+
     let startLedgerToUse = cursor;
     if (cursor === "now" || cursor === "0" || Number(cursor) === 0) {
-      const latest = await rpc.getLatestLedger();
-      startLedgerToUse = latest.sequence;
+      startLedgerToUse = networkHead;
       cursor = startLedgerToUse.toString(); // Initialize cursor
     }
+
+    updateLedgerMetrics(Number(cursor), Number(networkHead));
 
     const response = await rpc.getEvents({
       startLedger: Number(startLedgerToUse),
@@ -373,6 +379,7 @@ async function poll() {
     for (const event of response.events) {
       await handleEvent(event);
       cursor = event.ledger.toString(); // Update cursor to the last event's ledger
+      updateLedgerMetrics(Number(cursor), Number(networkHead));
     }
 
     // In production, persist cursor to storage (e.g., file, database) here

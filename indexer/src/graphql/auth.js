@@ -93,12 +93,59 @@ function isOwner(context, creatorAddress) {
   return context?.user?.address === creatorAddress;
 }
 
+/**
+ * Express middleware for REST JWT authentication.
+ */
+function expressJwtAuth(req, res, next) {
+  const authHeader = req.headers.authorization || '';
+  if (!authHeader.startsWith('Bearer ')) {
+    req.user = { role: ROLES.ANONYMOUS };
+    return next();
+  }
+
+  const token = authHeader.replace('Bearer ', '');
+  const decoded = verifyToken(token);
+  if (!decoded) {
+    return res.status(401).json({
+      error: 'Unauthorized',
+      message: 'Invalid or expired JWT token',
+    });
+  }
+
+  req.user = {
+    id: decoded.id,
+    role: decoded.role || ROLES.USER,
+    address: decoded.address,
+  };
+  next();
+}
+
+/**
+ * Express middleware to enforce minimum required role for REST routes.
+ */
+function requireRole(requiredRole) {
+  return (req, res, next) => {
+    const userRole = req.user?.role || ROLES.ANONYMOUS;
+    if (ROLE_HIERARCHY[userRole] < ROLE_HIERARCHY[requiredRole]) {
+      return res.status(403).json({
+        error: 'Forbidden',
+        message: `Requires ${requiredRole} access level`,
+      });
+    }
+    next();
+  };
+}
+
 module.exports = {
   ROLES,
   ROLE_HIERARCHY,
   JWT_SECRET,
+  verifyToken,
   createContext,
   enforceRole,
   authField,
-  isOwner
+  isOwner,
+  expressJwtAuth,
+  requireRole,
 };
+

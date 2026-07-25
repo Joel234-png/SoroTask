@@ -3,17 +3,49 @@ const { ApolloServer } = require('apollo-server-express');
 const cors = require('cors');
 const { typeDefs } = require('./graphql/schema');
 const { resolvers } = require('./graphql/resolvers');
-const { createContext } = require('./graphql/auth');
+const { createContext, expressJwtAuth, requireRole, ROLES } = require('./graphql/auth');
+const { metricsHandler } = require('./metrics');
+const { createRateLimiter } = require('./rateLimiter');
 
-async function startApiServer(port = 4000) {
+function createExpressApp() {
   const app = express();
   app.use(cors());
+  app.use(express.json());
+
+  // Prometheus Metrics endpoint (exempt from rate limit/auth for scraper access)
+  app.get('/metrics', metricsHandler);
+
+  // Apply JWT Auth Middleware and Rate Limiter Engine across REST routes
+  const rateLimiter = createRateLimiter({ defaultLimit: 100, windowSeconds: 60 });
+  app.use(expressJwtAuth);
+  app.use(rateLimiter);
+
+  // REST API Routes
+  app.get('/api/health', (req, res) => {
+    res.json({
+      status: 'ok',
+      timestamp: new Date().toISOString(),
+      user: req.user || { role: ROLES.ANONYMOUS },
+    });
+  });
+
+  app.get('/api/protected', requireRole(ROLES.USER), (req, res) => {
+    res.json({
+      message: 'Access granted to protected endpoint',
+      user: req.user,
+    });
+  });
+
+  return app;
+}
+
+async function startApiServer(port = 4000) {
+  const app = createExpressApp();
 
   const server = new ApolloServer({
     typeDefs,
     resolvers,
     context: createContext,
-    // Enable introspection in MVP to test the API easily
     introspection: true,
   });
 
@@ -23,9 +55,10 @@ async function startApiServer(port = 4000) {
   return new Promise((resolve) => {
     const httpServer = app.listen(port, () => {
       console.log(`🚀 GraphQL API ready at http://localhost:${port}${server.graphqlPath}`);
+      console.log(`📊 Prometheus Metrics ready at http://localhost:${port}/metrics`);
       resolve(httpServer);
     });
   });
 }
 
-module.exports = { startApiServer };
+module.exports = { startApiServer, createExpressApp };

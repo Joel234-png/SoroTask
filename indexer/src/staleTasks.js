@@ -5,7 +5,8 @@ const DEFAULT_OPTIONS = Object.freeze({
   dryRun: true,
 });
 
-function normalizeCleanupOptions(options = {}, now = new Date()) {
+function normalizeCleanupOptions(options = {}, fallbackNow = new Date()) {
+  const now = options.now || fallbackNow;
   const staleAfterMs = Number(options.staleAfterMs || DEFAULT_OPTIONS.staleAfterMs);
   const inactiveGraceMs = Number(options.inactiveGraceMs || DEFAULT_OPTIONS.inactiveGraceMs);
   const limit = Number(options.limit || DEFAULT_OPTIONS.limit);
