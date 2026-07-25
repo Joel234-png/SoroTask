@@ -5,6 +5,7 @@ import { useTasks } from "@/src/hooks/tasks";
 import { useLayoutStore } from "@/src/store/layoutStore";
 import SplitPaneLayout from "@/src/components/layout/SplitPaneLayout";
 import TaskCardWithSelection from "@/components/TaskCardWithSelection";
+import TaskSimulationWorkbench from "@/components/TaskSimulationWorkbench";
 import type { TaskFilters } from "@/src/lib/query/keys";
 import { createPerformanceMonitor, afterNextPaint } from "@/src/lib/frontend-performance";
 
@@ -200,6 +201,10 @@ function TasksPageContent() {
             </div>
           </div>
         )}
+      </div>
+      {/* #872 Simulation Workbench — mounted in the detail panel */}
+      <div className="mt-6 px-6 pb-6">
+        <TaskSimulationWorkbench />
       </div>
     </SplitPaneLayout>
   );
