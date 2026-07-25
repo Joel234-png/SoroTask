@@ -65,7 +65,7 @@ pub enum Error {
     TaskNotFound = 36,
     InvalidUpgradeVersion = 37,
     DuplicateTask = 38,
-    BountyBelowMinimum = 38,
+    BountyBelowMinimum = 40,
     InvalidBounty = 39,
 }
 
@@ -1145,7 +1145,7 @@ impl SoroTaskContract {
             &config.target,
             &config.function,
             &config.args,
-            config.interval,
+            config.interval.into(),
         );
         let fingerprint_key = DataKey::TaskFingerprint(fingerprint.clone());
         if env.storage().persistent().has(&fingerprint_key) {
@@ -2175,9 +2175,8 @@ impl SoroTaskContract {
             env, task_id, keeper, ExecutionStep::CheckWhitelist, StepResult::Passed, 0,
         );
 
-        if env.ledger().timestamp() < config.last_run + config.interval as u64 {
         // ── 5. Check interval ─────────────────────────────────────────────
-        if env.ledger().timestamp() < config.last_run + config.interval {
+        if env.ledger().timestamp() < config.last_run + config.interval as u64 {
             trace_steps.push_back(events::ExecutionStepRecord {
                 step: ExecutionStep::CheckInterval,
                 result: StepResult::Skipped,
@@ -2226,14 +2225,14 @@ impl SoroTaskContract {
             Some(ref resolver_address) => {
                 let mut resolver_call_args = Vec::<Val>::new(env);
                 resolver_call_args.push_back(config.args.clone().into_val(env));
-                matches!(
-                    env.try_invoke_contract::<bool, soroban_sdk::Error>(
-                        resolver_address,
-                        &Symbol::new(env, "check_condition"),
-                        resolver_call_args,
-                    ),
-                    Ok(Ok(true))
-                )
+                match env.try_invoke_contract::<bool, soroban_sdk::Error>(
+                    resolver_address,
+                    &Symbol::new(env, "check_condition"),
+                    resolver_call_args,
+                ) {
+                    Ok(Ok(true)) => true,
+                    _ => false,
+                }
             }
             None => true,
         };
@@ -2367,10 +2366,7 @@ impl SoroTaskContract {
             // ── 12. Yield strategy execution ─────────────────────────────
             let executed_yield_strategy = if let Some(ref yield_strategy_id) = config.yield_strategy
             {
-                Self::execute_yield_strategy_internal(env, *yield_strategy_id, task_id)
-                    .expect("Yield strategy execution failed");
-                true
-                match Self::execute_yield_strategy(env.clone(), *yield_strategy_id, task_id) {
+                match Self::execute_yield_strategy_internal(env, *yield_strategy_id, task_id) {
                     Ok(_) => {
                         trace_steps.push_back(events::ExecutionStepRecord {
                             step: ExecutionStep::ExecuteYield,
@@ -2868,7 +2864,7 @@ impl SoroTaskContract {
             &config.target,
             &config.function,
             &config.args,
-            config.interval,
+            config.interval.into(),
         );
         env.storage()
             .persistent()
@@ -5791,7 +5787,7 @@ pub(crate) mod tests {
         // interval so none of them collide with the duplicate-registration check.
         for i in 1..=100u64 {
             let mut cfg = config.clone();
-            cfg.interval = 3600 + i;
+            cfg.interval = 3600 + (i as u32);
             let id = client.register(&cfg);
             assert_eq!(id, i, "Task {} should have ID {}", i, i);
         }
@@ -5828,7 +5824,7 @@ pub(crate) mod tests {
         let mut ids = Vec::new(&env);
         for i in 0..50u64 {
             let mut cfg = config.clone();
-            cfg.interval = 3600 + i; // distinct per registration, not a duplicate
+            cfg.interval = 3600 + (i as u32); // distinct per registration, not a duplicate
             ids.push_back(client.register(&cfg));
         }
 
@@ -5930,7 +5926,7 @@ pub(crate) mod tests {
         let mut prev_id = 0u64;
         for i in 0..20u64 {
             let mut cfg = config.clone();
-            cfg.interval = 3600 + i; // distinct per registration, not a duplicate
+            cfg.interval = 3600 + (i as u32); // distinct per registration, not a duplicate
             let current_id = client.register(&cfg);
             assert!(
                 current_id > prev_id,
