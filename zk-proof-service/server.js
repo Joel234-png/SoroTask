@@ -1,6 +1,14 @@
 const express = require('express');
+const path = require('path');
+const OpenApiValidator = require('express-openapi-validator');
 const { ZKProofService } = require('./index');
-const { hashTaskCondition, serializeProof, checkConstraint } = require('./lib/helpers');
+const {
+  hashTaskCondition,
+  serializeProof,
+  checkConstraint,
+  decryptWitnessECIES,
+  zeroizeBuffer,
+} = require('./lib/helpers');
 
 const SERVICE_VERSION = '1.0.0';
 
@@ -22,8 +30,8 @@ function validateGenerateRequest(body) {
   if (!body.taskCondition.type || body.taskCondition.params == null) {
     return { valid: false, message: 'taskCondition must include type and params' };
   }
-  if (!body.clientData.witness) {
-    return { valid: false, message: 'clientData.witness is required' };
+  if (!body.clientData.witness && !body.clientData.encryptedWitness) {
+    return { valid: false, message: 'clientData.witness or clientData.encryptedWitness is required' };
   }
   return { valid: true };
 }
@@ -45,15 +53,29 @@ function validateVerifyRequest(body) {
 
 /**
  * @param {ZKProofService} zkService
- * @param {{ apiToken?: string, version?: string, startTime?: number }} [options]
+ * @param {{ apiToken?: string, version?: string, startTime?: number, eciesPrivateKey?: string, disableOpenApiValidation?: boolean }} [options]
  */
 function createApp(zkService, options = {}) {
   const app = express();
   const apiToken = options.apiToken ?? process.env.ZK_PROOF_API_TOKEN;
   const version = options.version ?? SERVICE_VERSION;
   const startTime = options.startTime ?? Date.now();
+  const eciesPrivateKey = options.eciesPrivateKey ?? process.env.ECIES_PRIVATE_KEY;
 
   app.use(express.json({ limit: '1mb' }));
+
+  // OpenAPI v3 Schema Validation Middleware
+  if (!options.disableOpenApiValidation) {
+    const apiSpec = path.join(__dirname, 'openapi.yaml');
+    app.use(
+      OpenApiValidator.middleware({
+        apiSpec,
+        validateRequests: true,
+        validateResponses: false,
+        ignorePaths: (pathStr) => pathStr === '/health',
+      }),
+    );
+  }
 
   function authenticate(req, res, next) {
     if (!apiToken) return next();
@@ -95,19 +117,35 @@ function createApp(zkService, options = {}) {
       return sendError(res, 503, 'SERVICE_NOT_READY', 'ZK proof worker pool is not initialized');
     }
 
-    const { taskId, circuitId, taskCondition, clientData } = req.body;
-    const constraint = checkConstraint(taskCondition, clientData, circuitId);
-    if (!constraint.ok) {
-      return sendError(
-        res,
-        422,
-        'CONSTRAINT_UNSATISFIED',
-        'Client witness does not satisfy task condition constraints',
-        constraint.details,
-      );
+    let { taskId, circuitId, taskCondition, clientData } = req.body;
+    let witnessBuffer = null;
+
+    // Handle ECIES Encrypted Witness Transport if encryptedWitness is provided
+    if (clientData.encryptedWitness) {
+      if (!eciesPrivateKey) {
+        return sendError(res, 400, 'INVALID_INPUT', 'ECIES private key not configured on server');
+      }
+      try {
+        const decrypted = decryptWitnessECIES(clientData.encryptedWitness, eciesPrivateKey);
+        clientData = { ...clientData, witness: decrypted.witness };
+        witnessBuffer = decrypted.decryptedBuffer;
+      } catch (err) {
+        return sendError(res, 400, 'INVALID_INPUT', `ECIES witness decryption failed: ${err.message}`);
+      }
     }
 
     try {
+      const constraint = checkConstraint(taskCondition, clientData, circuitId);
+      if (!constraint.ok) {
+        return sendError(
+          res,
+          422,
+          'CONSTRAINT_UNSATISFIED',
+          'Client witness does not satisfy task condition constraints',
+          constraint.details,
+        );
+      }
+
       const rawProof = await zkService.generateProof(taskCondition, clientData);
       const conditionHash = hashTaskCondition(taskCondition);
       const proof = {
@@ -135,6 +173,11 @@ function createApp(zkService, options = {}) {
         return sendError(res, 400, 'INVALID_INPUT', error.message);
       }
       return sendError(res, 500, 'PROOF_GENERATION_FAILED', error.message);
+    } finally {
+      // Zero out decrypted witness buffer immediately after proof generation
+      if (witnessBuffer) {
+        zeroizeBuffer(witnessBuffer);
+      }
     }
   });
 
@@ -179,6 +222,18 @@ function createApp(zkService, options = {}) {
     }
   });
 
+  // OpenAPI Validation Error Handler
+  app.use((err, _req, res, next) => {
+    if (err.status || err.errors) {
+      return sendError(
+        res,
+        err.status || 400,
+        'INVALID_INPUT',
+        err.message || 'Validation error',
+        err.errors || [],
+      );
+    }
+    next(err);
   app.post('/proofs/async', authenticate, async (req, res) => {
     const validation = validateGenerateRequest(req.body || {});
     if (!validation.valid) {

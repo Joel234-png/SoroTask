@@ -1,4 +1,5 @@
 const crypto = require('crypto');
+const { hashTaskCondition, isValidZkProof, zeroizeBuffer } = require('./lib/helpers');
 const EventEmitter = require('events');
 const { hashTaskCondition, isValidZkProof } = require('./lib/helpers');
 
@@ -107,6 +108,9 @@ class ZKProofService extends EventEmitter {
 
         setTimeout(() => {
           this._releaseWorker(worker);
+          if (clientData && clientData._witnessBuffer) {
+            zeroizeBuffer(clientData._witnessBuffer);
+          }
           resolve(proof);
         }, 100);
       } catch (error) {
