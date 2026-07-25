@@ -8,6 +8,9 @@ const {
 const { runStaleTaskCleanup } = require("./staleTasks");
 const { startApiServer } = require("./api");
 const { recordEventIndexed, updateLedgerMetrics } = require("./metrics");
+const { HighAvailabilityManager, ROLES } = require("./ha");
+const { CacheInvalidationEngine } = require("./cacheInvalidator");
+const { ParallelLedgerParser } = require("./parallelParser");
 
 // Configuration
 const RPC_URL = "https://soroban-testnet.stellar.org"; // Change as needed
@@ -148,6 +151,9 @@ async function handleEvent(event) {
   // After storing event, reconcile this task to ensure state is correct
   if (taskId) {
     await reconcileTask(taskId);
+    if (typeof cacheInvalidator !== 'undefined' && cacheInvalidator) {
+      cacheInvalidator.invalidateForEvent(name, taskId, JSON.parse(dataJson || '{}'));
+    }
   }
 }
 
@@ -480,3 +486,13 @@ process.on("SIGINT", () => {
     process.exit(0);
   });
 });
+
+module.exports = {
+  handleEvent,
+  reconcileTask,
+  reconcileAll,
+  HighAvailabilityManager,
+  CacheInvalidationEngine,
+  ParallelLedgerParser,
+};
+

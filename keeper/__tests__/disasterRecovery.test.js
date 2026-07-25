@@ -105,4 +105,23 @@ describe('MultiRegionRPCClient', () => {
 
     expect(client.getStateSnapshot().endpoints[0].unavailable).toBe(false);
   });
+
+  test('returns latency heatmap matrix', async () => {
+    const client = new MultiRegionRPCClient(['https://a.example', 'https://b.example'], {
+      serverFactory: createFakeServerFactory({
+        'https://a.example': {
+          getNetwork: async () => ({ passphrase: 'A' }),
+        },
+      }),
+    });
+
+    const server = client.getServerFacade();
+    await server.getNetwork();
+
+    const heatmap = server.getLatencyHeatmap();
+    expect(Array.isArray(heatmap)).toBe(true);
+    expect(heatmap.length).toBe(2);
+    expect(heatmap[0]).toHaveProperty('avgLatencyMs');
+    expect(heatmap[0]).toHaveProperty('status');
+  });
 });

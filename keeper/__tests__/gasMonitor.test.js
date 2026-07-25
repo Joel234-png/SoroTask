@@ -45,4 +45,25 @@ describe('GasMonitor', () => {
     const result = await gasMonitor.checkGasBalance('task1', 100);
     expect(typeof result).toBe('boolean');
   });
+
+  it('should calculate priority fee bid under mempool fee competition', () => {
+    const priorityFee = gasMonitor.calculatePriorityFeeBid({
+      minBaseFee: 100,
+      maxFee: 5000,
+      urgencyLevel: 3,
+      congestionFactor: 1.5,
+    });
+    expect(priorityFee).toBeGreaterThanOrEqual(100);
+    expect(priorityFee).toBeLessThanOrEqual(5000);
+  });
+
+  it('should simulate mempool fees from Stellar fee statistics', () => {
+    const simulation = gasMonitor.simulateMempoolFees({
+      min_base_fee: '100',
+      mode_base_fee: '150',
+      p90_base_fee: '200',
+    });
+    expect(simulation.congestionFactor).toBe(2);
+    expect(simulation.recommendedPriorityFee).toBeGreaterThanOrEqual(100);
+  });
 });

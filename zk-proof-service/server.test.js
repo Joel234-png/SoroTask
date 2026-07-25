@@ -99,5 +99,35 @@ describe('server', () => {
     expect(res.status).toBe(400);
     expect(res.body.error).toBeDefined();
     expect(res.body.error.code).toBe('INVALID_INPUT');
+  test('POST /proofs/async enqueues job and GET /proofs/:job_id/stream streams SSE updates', async () => {
+    const app = createApp(zkService);
+    const payload = {
+      taskId: 101,
+      circuitId: 'soro_task_v1',
+      taskCondition: {
+        type: 'min_balance',
+        params: { amount: '100' },
+      },
+      clientData: {
+        witness: { balance: '200' },
+      },
+    };
+
+    const asyncRes = await request(app)
+      .post('/proofs/async')
+      .send(payload);
+
+    expect(asyncRes.status).toBe(202);
+    expect(asyncRes.body.status).toBe('queued');
+    expect(asyncRes.body.jobId).toBeDefined();
+
+    const jobId = asyncRes.body.jobId;
+
+    // Stream SSE events
+    const streamRes = await request(app)
+      .get(`/proofs/${jobId}/stream`);
+
+    expect(streamRes.headers['content-type']).toContain('text/event-stream');
+    expect(streamRes.text).toContain('event: status');
   });
 });

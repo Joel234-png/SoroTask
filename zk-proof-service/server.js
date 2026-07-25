@@ -234,6 +234,106 @@ function createApp(zkService, options = {}) {
       );
     }
     next(err);
+  app.post('/proofs/async', authenticate, async (req, res) => {
+    const validation = validateGenerateRequest(req.body || {});
+    if (!validation.valid) {
+      if (validation.missingFields) {
+        return sendError(res, 400, 'INVALID_INPUT', 'taskCondition and clientData are required', {
+          missingFields: validation.missingFields,
+        });
+      }
+      return sendError(res, 400, 'INVALID_INPUT', validation.message);
+    }
+
+    if (!zkService.isReady) {
+      return sendError(res, 503, 'SERVICE_NOT_READY', 'ZK proof worker pool is not initialized');
+    }
+
+    const { taskId, circuitId, taskCondition, clientData } = req.body;
+    const constraint = checkConstraint(taskCondition, clientData, circuitId);
+    if (!constraint.ok) {
+      return sendError(
+        res,
+        422,
+        'CONSTRAINT_UNSATISFIED',
+        'Client witness does not satisfy task condition constraints',
+        constraint.details,
+      );
+    }
+
+    try {
+      const asyncJob = zkService.enqueueAsyncJob(taskCondition, clientData);
+      return res.status(202).json({
+        jobId: asyncJob.jobId,
+        status: asyncJob.status,
+        taskId,
+        createdAt: asyncJob.createdAt,
+      });
+    } catch (error) {
+      return sendError(res, 500, 'PROOF_ASYNC_ENQUEUE_FAILED', error.message);
+    }
+  });
+
+  app.get('/proofs/:job_id/stream', (req, res) => {
+    const { job_id: jobId } = req.params;
+
+    res.setHeader('Content-Type', 'text/event-stream');
+    res.setHeader('Cache-Control', 'no-cache');
+    res.setHeader('Connection', 'keep-alive');
+
+    const job = zkService.getAsyncJob(jobId);
+    if (!job) {
+      res.write(`event: error\ndata: ${JSON.stringify({ error: 'Job not found', jobId })}\n\n`);
+      return res.end();
+    }
+
+    res.write(`event: status\ndata: ${JSON.stringify({ jobId: job.jobId, status: job.status, progress: job.progress })}\n\n`);
+
+    if (job.status === 'completed') {
+      res.write(`event: complete\ndata: ${JSON.stringify(job.result)}\n\n`);
+      return res.end();
+    }
+
+    if (job.status === 'failed') {
+      res.write(`event: error\ndata: ${JSON.stringify({ jobId: job.jobId, error: job.error })}\n\n`);
+      return res.end();
+    }
+
+    const onProgress = (data) => {
+      if (data.jobId === jobId) {
+        res.write(`event: progress\ndata: ${JSON.stringify(data)}\n\n`);
+      }
+    };
+
+    const onComplete = (completedJob) => {
+      if (completedJob.jobId === jobId) {
+        res.write(`event: complete\ndata: ${JSON.stringify(completedJob.result)}\n\n`);
+        cleanup();
+        res.end();
+      }
+    };
+
+    const onError = (failedJob) => {
+      if (failedJob.jobId === jobId) {
+        res.write(`event: error\ndata: ${JSON.stringify({ jobId, error: failedJob.error })}\n\n`);
+        cleanup();
+        res.end();
+      }
+    };
+
+    const cleanup = () => {
+      zkService.removeListener('jobProgress', onProgress);
+      zkService.removeListener('jobComplete', onComplete);
+      zkService.removeListener('jobError', onError);
+    };
+
+    zkService.on('jobProgress', onProgress);
+    zkService.on('jobComplete', onComplete);
+    zkService.on('jobError', onError);
+
+    req.on('close', () => {
+      cleanup();
+    });
   });
 
   return app;
