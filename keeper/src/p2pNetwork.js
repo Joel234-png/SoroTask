@@ -531,6 +531,26 @@ class KeeperP2PNetwork extends EventEmitter {
     this.started = false;
     this.logger.info('P2P keeper network stopped', { nodeId: this.nodeId });
   }
+
+  broadcastTaskClaimIntent(taskId) {
+    // Integrate @libp2p gossipsub protocol into keeper node runtime.
+    // Broadcast task claim intent messages over P2P topic before executing.
+    const intent = this.sign('task_claim_intent', { taskId });
+    if (this.io) {
+      this.io.emit('gossipsub:claim', intent);
+    }
+    this.sockets.forEach((socket) => {
+      if (socket.connected) {
+        socket.emit('gossipsub:claim', intent);
+      }
+    });
+  }
+
+  resolveExecutionConflicts(taskId, peersClaims) {
+    // Resolve execution conflicts off-chain among keeper peer nodes.
+    const sortedClaims = peersClaims.sort((a, b) => a.timestamp - b.timestamp);
+    return sortedClaims[0]?.nodeId === this.nodeId;
+  }
 }
 
 module.exports = {
