@@ -146,6 +146,15 @@ To add support for new event types:
 2. Define how to convert the event's `data` array to JSON
 3. Ensure the data structure matches what your analytics need
 
+## PostgreSQL / TimescaleDB (production)
+
+For high-volume deployments, apply the SQL migrations under `indexer/migrations/` to PostgreSQL with TimescaleDB enabled:
+
+1. `001_initial_schema.sql` — core relational schema.
+2. `002_timescaledb_raw_events_retention.sql` — renames the raw event store to `raw_events`, partitions it into **7-day hypertable chunks** on `ledger_timestamp`, enables **columnar compression for chunks older than 14 days**, and exposes a backwards-compatible `events` view for read queries.
+
+New writes should target `raw_events` and set `ledger_timestamp` to the ledger close time when available (existing rows are backfilled from `processed_at` during migration).
+
 ## Production Considerations
 
 For production deployments:
