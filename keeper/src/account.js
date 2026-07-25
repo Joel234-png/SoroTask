@@ -162,6 +162,40 @@ async function initializeKeeperAccount() {
 }
 
 /**
+ * Build a transition keyring for zero-downtime key rotation (Issue #848).
+ *
+ * The keeper normally runs with a single signing keypair. During a rotation
+ * window an operator sets KEEPER_ROTATION_NEXT_SECRET to the incoming key (after
+ * running beginRotation so it's an on-chain co-signer). This helper lets the
+ * polling/signing logic accept EITHER key as valid during that window, without
+ * changing its single-keypair assumption elsewhere — it just asks the keyring.
+ *
+ * When KEEPER_ROTATION_NEXT_SECRET is unset, the keyring wraps only the primary
+ * key and behaves exactly as before (fully backward compatible).
+ *
+ * @param {Keypair} primaryKeypair - the keeper's current keypair
+ * @returns {ReturnType<import('./keyRotation').createTransitionKeyring>}
+ */
+function buildTransitionKeyring(primaryKeypair) {
+  const { createTransitionKeyring } = require('./keyRotation');
+  let incoming = null;
+  const nextSecret = process.env.KEEPER_ROTATION_NEXT_SECRET;
+  if (nextSecret) {
+    try {
+      incoming = Keypair.fromSecret(nextSecret);
+      logger.info('Key rotation window active — accepting both signing keys', {
+        primary: primaryKeypair.publicKey(),
+        incoming: incoming.publicKey(),
+      });
+    } catch (_err) {
+      logger.warn('KEEPER_ROTATION_NEXT_SECRET is set but invalid — ignoring');
+      incoming = null;
+    }
+  }
+  return createTransitionKeyring(primaryKeypair, incoming);
+}
+
+/**
  * Returns a fresh Account object for transaction building.
  * @param {any} accountResponse The response from server.getAccount()
  * @returns {Account}
@@ -179,6 +213,7 @@ function loadAccount(config) {
 
 module.exports = {
   initializeKeeperAccount,
+  buildTransitionKeyring,
   getKeeperAccount,
   loadAccount,
   loadSecretKey,
