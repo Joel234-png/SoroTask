@@ -4,6 +4,7 @@ const path = require('path');
 const OpenApiValidator = require('express-openapi-validator');
 const { ZKProofService } = require('./index');
 const { Halo2ProverAdapter } = require('./lib/halo2-adapter');
+const { selectProverBackend, withProofTiming } = require('./lib/prover-backend');
 const {
   hashTaskCondition,
   serializeProof,
@@ -84,6 +85,13 @@ function createApp(zkService, options = {}) {
   // MOCK/REFERENCE backend — see lib/halo2-adapter.js for the honesty notice on
   // why no real halo2 proving happens in this build.
   const halo2Adapter = options.halo2Adapter ?? new Halo2ProverAdapter();
+
+  // Prover backend selection (Issue #850). Defaults to the CPU path with zero
+  // behaviour change. If PROVER_BACKEND is explicitly set to cuda|metal with no
+  // real GPU backend wired in, selectProverBackend() throws here so a
+  // misconfigured deployment fails fast at startup instead of silently running
+  // on CPU while believing it is GPU-accelerated.
+  const proverBackend = options.proverBackend ?? selectProverBackend({ gpuBackends: options.gpuBackends });
 
   app.use(express.json({ limit: '1mb' }));
 
@@ -264,7 +272,13 @@ function createApp(zkService, options = {}) {
         );
       }
 
-      const rawProof = await zkService.generateProof(taskCondition, clientData);
+      // Wrap the real (CPU) proof generation in the timing harness so there is
+      // an apples-to-apples wall-clock baseline for a future GPU backend (#850).
+      const timed = await withProofTiming(
+        () => zkService.generateProof(taskCondition, clientData),
+        { backend: proverBackend.backend, label: 'groth16-generate-proof' },
+      );
+      const rawProof = timed.result;
       const conditionHash = hashTaskCondition(taskCondition);
       const proof = {
         pi_a: rawProof.pi_a,
@@ -280,6 +294,9 @@ function createApp(zkService, options = {}) {
         conditionHash,
         proof,
         serializedProof: serializeProof(proof),
+        proverBackend: proverBackend.backend,
+        accelerated: proverBackend.accelerated,
+        generationTimeMs: timed.durationMs,
         generatedAt: new Date().toISOString(),
         processingTimeMs: Date.now() - startedAt,
       });
