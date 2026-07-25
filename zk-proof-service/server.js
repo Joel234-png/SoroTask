@@ -3,6 +3,7 @@ const rateLimit = require('express-rate-limit');
 const path = require('path');
 const OpenApiValidator = require('express-openapi-validator');
 const { ZKProofService } = require('./index');
+const { Halo2ProverAdapter } = require('./lib/halo2-adapter');
 const {
   hashTaskCondition,
   serializeProof,
@@ -79,6 +80,11 @@ function createApp(zkService, options = {}) {
   const startTime = options.startTime ?? Date.now();
   const eciesPrivateKey = options.eciesPrivateKey ?? process.env.ECIES_PRIVATE_KEY;
 
+  // halo2 proving gateway (Issue #851). Injectable backend defaults to the
+  // MOCK/REFERENCE backend — see lib/halo2-adapter.js for the honesty notice on
+  // why no real halo2 proving happens in this build.
+  const halo2Adapter = options.halo2Adapter ?? new Halo2ProverAdapter();
+
   app.use(express.json({ limit: '1mb' }));
 
   // ---------------------------------------------------------------------------
@@ -103,6 +109,79 @@ function createApp(zkService, options = {}) {
       );
     },
   });
+  // ---------------------------------------------------------------------------
+  // halo2 proof gateway routes (Issue #851).
+  // Registered BEFORE the OpenAPI validator on purpose: these endpoints carry a
+  // `scheme` field (kzg | ipa) that the existing OpenAPI schemas do not model,
+  // and the Halo2ProverAdapter performs its own request validation. The proof
+  // objects are explicitly marked isMock:true — this is a gateway/contract layer,
+  // NOT a real halo2 prover (see lib/halo2-adapter.js).
+  // ---------------------------------------------------------------------------
+  app.post('/generate-proof/halo2', generateProofLimiter, authenticate, (req, res) => {
+    const startedAt = Date.now();
+    const body = req.body || {};
+    const { taskId, circuitId, scheme, taskCondition } = body;
+    const circuitInput = body.clientData?.witness ?? body.circuitInput;
+
+    if (taskId == null || !circuitId || !taskCondition) {
+      return sendError(res, 400, 'INVALID_INPUT', 'taskId, circuitId and taskCondition are required');
+    }
+
+    try {
+      const proof = halo2Adapter.generateProof({ scheme, circuitId, circuitInput });
+      const conditionHash = hashTaskCondition(taskCondition);
+      return res.json({
+        proofId: proof.proofId,
+        status: 'success',
+        taskId,
+        scheme: proof.scheme,
+        conditionHash,
+        proof,
+        backend: halo2Adapter.isMockBackend() ? 'mock-reference' : 'external',
+        isMock: halo2Adapter.isMockBackend(),
+        generatedAt: new Date().toISOString(),
+        processingTimeMs: Date.now() - startedAt,
+      });
+    } catch (error) {
+      if (error.code === 'INVALID_SCHEME' || error.code === 'INVALID_CIRCUIT_INPUT') {
+        return sendError(res, 400, error.code, error.message);
+      }
+      return sendError(res, 500, 'PROOF_GENERATION_FAILED', error.message);
+    }
+  });
+
+  app.post('/verify-proof/halo2', authenticate, (req, res) => {
+    const body = req.body || {};
+    const { taskId, circuitId, scheme, taskCondition, proof } = body;
+
+    if (taskId == null || !circuitId || !taskCondition || !proof) {
+      return sendError(res, 400, 'INVALID_INPUT', 'taskId, circuitId, taskCondition and proof are required');
+    }
+
+    try {
+      const result = halo2Adapter.verifyProof({ scheme, proof });
+      return res.json({
+        valid: result.valid,
+        proofId: proof.proofId,
+        taskId,
+        scheme: scheme.toLowerCase(),
+        conditionHash: hashTaskCondition(taskCondition),
+        isMock: halo2Adapter.isMockBackend(),
+        verifiedAt: new Date().toISOString(),
+        verificationDetails: {
+          circuitId,
+          reason: result.reason,
+          note: 'Structural verification only — mock backend does not verify ZK soundness.',
+        },
+      });
+    } catch (error) {
+      if (error.code === 'INVALID_SCHEME' || error.code === 'INVALID_CIRCUIT_INPUT') {
+        return sendError(res, 400, error.code, error.message);
+      }
+      return sendError(res, 500, 'PROOF_VERIFICATION_FAILED', error.message);
+    }
+  });
+
   // OpenAPI v3 Schema Validation Middleware
   if (!options.disableOpenApiValidation) {
     const apiSpec = path.join(__dirname, 'openapi.yaml');
@@ -273,6 +352,8 @@ function createApp(zkService, options = {}) {
       );
     }
     next(err);
+  });
+
   app.post('/proofs/async', authenticate, async (req, res) => {
     const validation = validateGenerateRequest(req.body || {});
     if (!validation.valid) {
