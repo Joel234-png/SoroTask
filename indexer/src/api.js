@@ -4,10 +4,13 @@ const cors = require('cors');
 const { typeDefs } = require('./graphql/schema');
 const { resolvers } = require('./graphql/resolvers');
 const { createContext } = require('./graphql/auth');
+const { createCrossChainRouter } = require('./crossChainApi');
 
 async function startApiServer(port = 4000) {
   const app = express();
   app.use(cors());
+  app.use(express.json());
+  app.use('/api/cross-chain', createCrossChainRouter());
 
   const server = new ApolloServer({
     typeDefs,
