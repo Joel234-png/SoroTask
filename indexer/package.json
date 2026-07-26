@@ -4,7 +4,7 @@
   "description": "",
   "main": "index.js",
   "scripts": {
-    "test": "jest test/api.test.js src/graphql/__tests__/api.test.js && node --test test/reconciliation.test.js test/staleTasks.test.js"
+    "test": "jest test/api.test.js src/graphql/__tests__/api.test.js && node --test test/migrationRunner.test.js test/reconciliation.test.js test/staleTasks.test.js"
   },
   "keywords": [],
   "author": "",
