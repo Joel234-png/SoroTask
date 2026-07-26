@@ -204,6 +204,162 @@ function getKeeperAccount(accountResponse) {
   return new Account(accountResponse.accountId(), accountResponse.sequenceNumber());
 }
 
+// ---------------------------------------------------------------------------
+// #840 — Multi-Sig Transaction Builder with HSM Signing
+// ---------------------------------------------------------------------------
+// MultiSigHSMSigner wraps the existing HSMProvider abstraction to:
+//   1. Load one or more HSM key IDs from config (primary + optional co-signers).
+//   2. Build a Soroban TransactionEnvelope and collect signatures from every
+//      configured key — all signing happens inside the HSM so the private key
+//      material is never exported to process memory.
+//   3. Return the fully-signed XDR envelope ready for submission.
+//
+// PKCS#11 hardware (YubiHSM, AWS CloudHSM) is reached via the existing
+// HSMProvider interface in src/hsm/provider.js.  For development and CI the
+// MockHSMProvider from src/hsm/mockProvider.js is used automatically when
+// HSM_PROVIDER env var is not set.
+
+class MultiSigHSMSigner {
+  /**
+   * @param {object} opts
+   * @param {import('./hsm/provider').HSMProvider} opts.hsmProvider  - HSM driver instance
+   * @param {string[]} opts.keyIds          - Ordered list of HSM key IDs to sign with
+   * @param {string}   opts.networkPassphrase - Stellar network passphrase
+   * @param {object}   [opts.logger]          - Pino-compatible logger
+   */
+  constructor(opts = {}) {
+    if (!opts.hsmProvider) throw new Error('MultiSigHSMSigner: hsmProvider is required');
+    if (!Array.isArray(opts.keyIds) || opts.keyIds.length === 0) {
+      throw new Error('MultiSigHSMSigner: at least one keyId is required');
+    }
+
+    this.hsm = opts.hsmProvider;
+    this.keyIds = opts.keyIds;
+    this.networkPassphrase = opts.networkPassphrase
+      || process.env.NETWORK_PASSPHRASE
+      || 'Test SDF Network ; September 2015';
+    this.logger = opts.logger || createLogger('multisig-hsm');
+  }
+
+  /**
+   * Sign a transaction with every configured HSM key.
+   *
+   * Each key produces a Stellar Ed25519 signature over the transaction hash
+   * (the standard Stellar signing payload).  The decorated transaction is
+   * returned with all signatures attached.
+   *
+   * Private key material never leaves the HSM — only the 32-byte
+   * transaction hash is sent to each key for signing.
+   *
+   * @param {import('@stellar/stellar-sdk').Transaction} transaction
+   * @returns {Promise<import('@stellar/stellar-sdk').Transaction>} signed transaction
+   */
+  async signTransaction(transaction) {
+    const { hash } = require('@stellar/stellar-sdk').hash
+      ? require('@stellar/stellar-sdk')
+      : require('@stellar/stellar-sdk');
+
+    // Compute the standard Stellar transaction hash (signing payload)
+    const txHash = transaction.hash();
+
+    this.logger.info('MultiSigHSMSigner: signing transaction', {
+      keyCount: this.keyIds.length,
+      txHash: txHash.toString('hex').slice(0, 16) + '…',
+    });
+
+    for (const keyId of this.keyIds) {
+      // Retrieve the public key from the HSM so we can attach the correct
+      // decorated signature to the transaction envelope
+      const { publicPem } = await this.hsm.getPublicKey(keyId);
+
+      // Sign the 32-byte tx hash inside the HSM — private key never leaves
+      const signatureBuffer = await this.hsm.sign(keyId, txHash);
+
+      // Derive the Stellar public key from PEM so we can build the decorated sig
+      const stellarPublicKey = _pemToStellarPublicKey(publicPem);
+
+      // Attach the signature to the transaction (Stellar SDK convention)
+      transaction.addDecoratedSignature(
+        Buffer.from(stellarPublicKey, 'hex').slice(0, 4), // hint = first 4 bytes of raw public key
+        signatureBuffer,
+      );
+
+      this.logger.info('MultiSigHSMSigner: signature added', { keyId, hint: Buffer.from(stellarPublicKey, 'hex').slice(0, 4).toString('hex') });
+    }
+
+    return transaction;
+  }
+
+  /**
+   * Convenience helper: sign and return the transaction as base64 XDR.
+   * @param {import('@stellar/stellar-sdk').Transaction} transaction
+   * @returns {Promise<string>} base64-encoded signed XDR envelope
+   */
+  async signToXDR(transaction) {
+    const signed = await this.signTransaction(transaction);
+    return signed.toEnvelope().toXDR('base64');
+  }
+}
+
+/**
+ * Derive a hex-encoded raw Ed25519 public key from a PKCS#8 PEM string.
+ * Used to build the Stellar decorated signature hint.
+ * @param {string} pem
+ * @returns {string} hex string of the raw 32-byte public key
+ */
+function _pemToStellarPublicKey(pem) {
+  const crypto = require('crypto');
+  try {
+    const keyObj = crypto.createPublicKey(pem);
+    // export as raw DER (SubjectPublicKeyInfo); last 32 bytes are the Ed25519 key
+    const der = keyObj.export({ type: 'spki', format: 'der' });
+    return der.slice(-32).toString('hex');
+  } catch (_err) {
+    // Fallback: return zero bytes if key parsing fails (should not happen in production)
+    return '0'.repeat(64);
+  }
+}
+
+/**
+ * Factory: create a MultiSigHSMSigner from environment variables.
+ *
+ * Environment variables:
+ *   HSM_PROVIDER   - 'mock' (default) | 'pkcs11' | 'aws-cloudhsm'
+ *   HSM_KEY_IDS    - Comma-separated list of HSM key IDs for multi-sig
+ *   NETWORK_PASSPHRASE - Stellar network passphrase
+ *
+ * @param {object} [opts] - Optional overrides (injected in tests)
+ * @returns {MultiSigHSMSigner|null} null when HSM_KEY_IDS is not configured
+ */
+function createMultiSigSigner(opts = {}) {
+  const keyIdsRaw = opts.keyIds || process.env.HSM_KEY_IDS || '';
+  const keyIds = keyIdsRaw.split(',').map((s) => s.trim()).filter(Boolean);
+  if (keyIds.length === 0) return null; // HSM multi-sig not configured
+
+  const providerType = (opts.providerType || process.env.HSM_PROVIDER || 'mock').toLowerCase();
+  let hsmProvider;
+
+  if (providerType === 'mock') {
+    const { MockHSMProvider } = require('./hsm/mockProvider');
+    hsmProvider = opts.hsmProvider || new MockHSMProvider({ logger: opts.logger });
+  } else {
+    // For production PKCS#11 / AWS CloudHSM: the operator is responsible for
+    // installing and configuring the appropriate HSMProvider subclass.
+    // Raise a clear error rather than silently falling back.
+    throw new Error(
+      `HSM provider '${providerType}' is not bundled. ` +
+      'Implement a custom HSMProvider subclass (see src/hsm/provider.js) and pass it via opts.hsmProvider.',
+    );
+  }
+
+  return new MultiSigHSMSigner({
+    hsmProvider,
+    keyIds,
+    networkPassphrase: opts.networkPassphrase,
+    logger: opts.logger,
+  });
+}
+
 /**
  * Legacy compatibility with loadAccount from main
  */
@@ -220,4 +376,6 @@ module.exports = {
   fetchSecretFromVault,
   fetchSecretFromAWS,
   clearSecretMemory,
+  MultiSigHSMSigner,
+  createMultiSigSigner,
 };
