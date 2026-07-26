@@ -85,6 +85,14 @@
                     },
                     {
                       "key": {
+                        "symbol": "permissions"
+                      },
+                      "val": {
+                        "u32": 15
+                      }
+                    },
+                    {
+                      "key": {
                         "symbol": "resolver"
                       },
                       "val": "void"
@@ -193,6 +201,14 @@
                       },
                       "val": {
                         "u64": "0"
+                      }
+                    },
+                    {
+                      "key": {
+                        "symbol": "permissions"
+                      },
+                      "val": {
+                        "u32": 15
                       }
                     },
                     {
@@ -1428,6 +1444,14 @@
                   },
                   {
                     "key": {
+                      "symbol": "permissions"
+                    },
+                    "val": {
+                      "u32": 15
+                    }
+                  },
+                  {
+                    "key": {
                       "symbol": "resolver"
                     },
                     "val": "void"
@@ -1460,7 +1484,7 @@
           },
           "ext": "v0"
         },
-        "live_until": 4095
+        "live_until": 100000
       },
       {
         "entry": {
@@ -1548,6 +1572,14 @@
                     },
                     "val": {
                       "u64": "0"
+                    }
+                  },
+                  {
+                    "key": {
+                      "symbol": "permissions"
+                    },
+                    "val": {
+                      "u32": 15
                     }
                   },
                   {

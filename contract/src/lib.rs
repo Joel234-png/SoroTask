@@ -161,6 +161,12 @@ const MAX_DEPENDENCY_DEPTH: u32 = 16;
 /// Maximum number of tasks allowed in a single batch execution
 const MAX_BATCH_SIZE: u32 = 100;
 
+/// Permission Bitmask Flags for Task RBAC
+pub const PERM_CAN_PAUSE: u32 = 1;
+pub const PERM_CAN_UPDATE: u32 = 2;
+pub const PERM_CAN_CANCEL: u32 = 4;
+pub const PERM_CAN_DEPOSIT: u32 = 8;
+
 #[contracttype]
 #[derive(Clone, Debug)]
 pub struct TaskConfig {
@@ -180,6 +186,8 @@ pub struct TaskConfig {
     pub blocked_by: Vec<u64>,
     /// Optional yield strategy ID for automated yield harvesting
     pub yield_strategy: Option<u64>,
+    /// Gas-optimized bitmask vector for role-based permissions
+    pub permissions: u32,
 }
 
 #[contracttype]
@@ -737,6 +745,7 @@ pub enum DataKey {
     RoleAssignments(Address),
     PermissionGrants(Address),
     Delegations(Address),
+    VoteDelegation(Address),
     RoleAssignmentCounter,
     PermissionGrantCounter,
     DelegationCounter,
@@ -1380,6 +1389,9 @@ impl SoroTaskContract {
         env.storage().persistent().set(&fingerprint_key, &true);
 
         config.is_active = true;
+        if config.permissions == 0 {
+            config.permissions = PERM_CAN_PAUSE | PERM_CAN_UPDATE | PERM_CAN_CANCEL | PERM_CAN_DEPOSIT;
+        }
 
         // Allocate next sequential ID:
         // 1. Fetch current counter (defaults to 0 if first registration)
@@ -1522,6 +1534,10 @@ impl SoroTaskContract {
 
         if !skip_auth {
             config.creator.require_auth();
+        }
+
+        if config.permissions != 0 && (config.permissions & PERM_CAN_PAUSE) == 0 {
+            panic_with_error!(env, Error::Unauthorized);
         }
 
         if !config.is_active {
@@ -2704,6 +2720,7 @@ impl SoroTaskContract {
             // ── 15. Update state ─────────────────────────────────────────
             config.last_run = env.ledger().timestamp();
             env.storage().persistent().set(&task_key, &config);
+            env.storage().persistent().extend_ttl(&task_key, 100_000, 100_000);
             Self::set_task_status(env, task_id, ExecutionOutcome::Success);
             final_outcome = ExecutionOutcome::Success;
 
@@ -2980,6 +2997,10 @@ impl SoroTaskContract {
             .get(&task_key)
             .expect("Task not found");
 
+        if config.permissions != 0 && (config.permissions & PERM_CAN_DEPOSIT) == 0 {
+            panic_with_error!(env, Error::Unauthorized);
+        }
+
         let token_address: Address = env
             .storage()
             .instance()
@@ -3069,6 +3090,10 @@ impl SoroTaskContract {
         // Validate: Only creator can cancel
         config.creator.require_auth();
 
+        if config.permissions != 0 && (config.permissions & PERM_CAN_CANCEL) == 0 {
+            panic_with_error!(&env, Error::Unauthorized);
+        }
+
         // Refund: Automatically withdraw all remaining gas_balance to the creator
         if config.gas_balance > 0 {
             if env.storage().instance().has(&DataKey::Token) {
@@ -3138,6 +3163,10 @@ impl SoroTaskContract {
 
         existing.creator.require_auth();
 
+        if existing.permissions != 0 && (existing.permissions & PERM_CAN_UPDATE) == 0 {
+            panic_with_error!(&env, Error::Unauthorized);
+        }
+
         if new_config.interval == 0 {
             panic_with_error!(&env, Error::InvalidInterval);
         }
@@ -3150,6 +3179,7 @@ impl SoroTaskContract {
             creator: existing.creator,
             gas_balance: existing.gas_balance,
             last_run: existing.last_run,
+            permissions: if new_config.permissions != 0 { new_config.permissions } else { existing.permissions },
             ..new_config
         };
 
@@ -4480,6 +4510,11 @@ impl SoroTaskContract {
             .get::<DataKey, GovernanceProposal>(&DataKey::GovernanceProposal(proposal_id))
             .expect("Proposal not found");
 
+        // Ensure proposal timelock has expired before automatic execution
+        if env.ledger().timestamp() < proposal.expires_at {
+            panic_with_error!(&env, Error::InvalidInterval);
+        }
+
         if proposal.status != ProposalStatus::Passed {
             panic_with_error!(&env, Error::InvalidInterval); // Reuse error code for simplicity
         }
@@ -4577,6 +4612,63 @@ impl SoroTaskContract {
         env.storage()
             .persistent()
             .get::<DataKey, GovernanceProposal>(&DataKey::GovernanceProposal(proposal_id))
+    }
+
+    /// Delegates vote weight to another address for governance proposals.
+    pub fn delegate_vote(env: Env, delegator: Address, delegatee: Address) {
+        enter_security_guard(&env);
+        delegator.require_auth();
+        env.storage()
+            .persistent()
+            .set(&DataKey::VoteDelegation(delegator.clone()), &delegatee);
+        env.events().publish(
+            (
+                Symbol::new(&env, "VoteDelegated"),
+                Symbol::new(&env, "v1"),
+                delegator,
+            ),
+            delegatee,
+        );
+        exit_security_guard(&env);
+    }
+
+    /// Retrieves the vote delegate address for a delegator, if set.
+    pub fn get_vote_delegate(env: Env, delegator: Address) -> Option<Address> {
+        env.storage()
+            .persistent()
+            .get::<DataKey, Address>(&DataKey::VoteDelegation(delegator))
+    }
+
+    /// Entrypoint to propose parameter changes or protocol updates via governance.
+    pub fn propose_parameter_change(
+        env: Env,
+        proposer: Address,
+        title: Bytes,
+        description: Bytes,
+        expires_at: u64,
+        proposal_type: ProposalType,
+        payload: Vec<Val>,
+    ) -> u64 {
+        Self::create_proposal(
+            env,
+            proposer,
+            title,
+            description,
+            expires_at,
+            proposal_type,
+            payload,
+        )
+    }
+
+    /// Entrypoint to vote on governance proposals.
+    pub fn vote(
+        env: Env,
+        voter: Address,
+        proposal_id: u64,
+        vote_for: bool,
+        voting_power: i128,
+    ) {
+        Self::vote_on_proposal(env, voter, proposal_id, vote_for, voting_power);
     }
 
     /// Helper function to check if current execution is from governance proposal
@@ -5250,6 +5342,7 @@ pub(crate) mod tests {
             whitelist: Vec::new(env),
             is_active: true,
             blocked_by: Vec::new(env),
+            permissions: 15,
         }
     }
 
@@ -5926,6 +6019,7 @@ pub(crate) mod tests {
             whitelist: Vec::new(&env),
             is_active: true,
             blocked_by: Vec::new(&env),
+            permissions: 15,
         };
 
         let task_id = client.register(&cfg);
@@ -6210,6 +6304,7 @@ pub(crate) mod tests {
             whitelist: Vec::new(&env),
             is_active: true,
             blocked_by: Vec::new(&env),
+            permissions: 15,
         };
 
         let task_id = client.register(&config);
@@ -6253,6 +6348,7 @@ pub(crate) mod tests {
             whitelist: Vec::new(&env),
             is_active: true,
             blocked_by: Vec::new(&env),
+            permissions: 15,
         };
 
         let mut config2 = config.clone();
@@ -6291,6 +6387,7 @@ pub(crate) mod tests {
             is_active: true,
             blocked_by: Vec::new(&env),
             yield_strategy: None,
+            permissions: 15,
         };
 
         let invalid_config = TaskConfig {
@@ -6306,6 +6403,7 @@ pub(crate) mod tests {
             is_active: true,
             blocked_by: Vec::new(&env),
             yield_strategy: None,
+            permissions: 15,
         };
 
         // Attempt invalid registration (should panic, counter not incremented)
@@ -6342,6 +6440,7 @@ pub(crate) mod tests {
             is_active: true,
             blocked_by: Vec::new(&env),
             yield_strategy: None,
+            permissions: 15,
         };
 
         // Register 100 tasks and verify IDs are 1..=100. Each gets a distinct
@@ -6380,6 +6479,7 @@ pub(crate) mod tests {
             is_active: true,
             blocked_by: Vec::new(&env),
             yield_strategy: None,
+            permissions: 15,
         };
 
         let mut ids = Vec::new(&env);
@@ -6430,6 +6530,7 @@ pub(crate) mod tests {
             is_active: true,
             blocked_by: Vec::new(&env),
             yield_strategy: None,
+            permissions: 15,
         };
 
         // Register 3 tasks (IDs 1, 2, 3). id2 uses the plain `config`; id1/id3
@@ -6482,6 +6583,7 @@ pub(crate) mod tests {
             is_active: true,
             blocked_by: Vec::new(&env),
             yield_strategy: None,
+            permissions: 15,
         };
 
         let mut prev_id = 0u64;
@@ -6523,6 +6625,7 @@ pub(crate) mod tests {
             whitelist: Vec::new(&env),
             is_active: true,
             blocked_by: Vec::new(&env),
+            permissions: 15,
         };
 
         let result = client.try_register(&config);
@@ -6626,6 +6729,7 @@ pub(crate) mod tests {
             whitelist: Vec::new(&env),
             is_active: true,
             blocked_by: Vec::new(&env),
+            permissions: 15,
         };
 
         let task_id = client.register(&config);
@@ -7466,6 +7570,7 @@ pub(crate) mod tests {
         client.vote_on_proposal(&proposer, &proposal_id, &true, &50);
 
         let executor = Address::generate(&env);
+        set_timestamp(&env, 10000);
         client.execute_proposal(&executor, &proposal_id);
 
         let executed = client.get_governance_proposal(&proposal_id).unwrap();
@@ -8140,6 +8245,7 @@ pub(crate) mod tests {
             is_active: true,
             blocked_by: Vec::new(&env),
             yield_strategy: None,
+            permissions: 15,
         };
 
         let task_id = client.register(&config);
@@ -8181,6 +8287,7 @@ pub(crate) mod tests {
             is_active: true,
             blocked_by: Vec::new(&env),
             yield_strategy: None,
+            permissions: 15,
         };
 
         let task_id = client.register(&config);
@@ -8196,6 +8303,83 @@ pub(crate) mod tests {
 
         let profit = client.execute_flash_swap_arbitrage(&keeper, &task_id, &params);
         assert!(profit >= 50);
+    }
+
+    #[test]
+    fn test_vote_delegation_and_propose_parameter_change() {
+        let (env, id) = setup();
+        let client = SoroTaskContractClient::new(&env, &id);
+
+        let token_admin = Address::generate(&env);
+        let token_id = env.register_stellar_asset_contract_v2(token_admin.clone());
+        let token_address = token_id.address();
+        let token_admin_client = soroban_sdk::token::StellarAssetClient::new(&env, &token_address);
+
+        client.init(&token_address);
+        client.init_staking_pool(&500);
+
+        let delegator = Address::generate(&env);
+        token_admin_client.mint(&delegator, &1000);
+        client.stake_tokens(&delegator, &100);
+
+        let delegatee = Address::generate(&env);
+
+        // Test vote delegation
+        client.delegate_vote(&delegator, &delegatee);
+        assert_eq!(client.get_vote_delegate(&delegator), Some(delegatee.clone()));
+
+        // Test propose parameter change
+        let title = Bytes::from_slice(&env, b"Param Change Proposal");
+        let description = Bytes::from_slice(&env, b"Update fee model params");
+        let mut payload: Vec<Val> = Vec::new(&env);
+        payload.push_back(100_i128.into_val(&env));
+        payload.push_back(1000_i128.into_val(&env));
+        payload.push_back(3_600_000_i128.into_val(&env));
+        payload.push_back(0_i128.into_val(&env));
+        payload.push_back(10_i128.into_val(&env));
+        payload.push_back(5000_i128.into_val(&env));
+
+        let proposal_id = client.propose_parameter_change(
+            &delegator,
+            &title,
+            &description,
+            &5000,
+            &ProposalType::UpdateTokenomicsConfig,
+            &payload,
+        );
+        assert_eq!(proposal_id, 1);
+
+        // Test vote entrypoint
+        client.vote(&delegator, &proposal_id, &true, &100);
+        let prop = client.get_governance_proposal(&proposal_id).unwrap();
+        assert_eq!(prop.votes_for, 100);
+    }
+
+    #[test]
+    fn test_bitmask_permission_checks() {
+        let (env, id) = setup();
+        let client = SoroTaskContractClient::new(&env, &id);
+        let target = env.register(MockTarget, ());
+
+        // Create config with only PERM_CAN_PAUSE permission
+        let mut cfg = base_config(&env, target.clone());
+        cfg.permissions = PERM_CAN_PAUSE;
+
+        let task_id = client.register(&cfg);
+        assert_eq!(client.get_task(&task_id).unwrap().permissions, PERM_CAN_PAUSE);
+
+        // Pause should succeed since PERM_CAN_PAUSE (1) is set
+        client.pause_task(&task_id);
+
+        // Modify should fail because PERM_CAN_UPDATE (2) is not set
+        let mut mod_cfg = cfg.clone();
+        mod_cfg.interval = 7200;
+        let mod_res = client.try_modify_task(&task_id, &mod_cfg);
+        assert!(mod_res.is_err());
+
+        // Cancel should fail because PERM_CAN_CANCEL (4) is not set
+        let cancel_res = client.try_cancel_task(&task_id);
+        assert!(cancel_res.is_err());
     }
 }
 

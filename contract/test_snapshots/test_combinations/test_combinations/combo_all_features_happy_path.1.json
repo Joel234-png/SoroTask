@@ -85,6 +85,14 @@
                     },
                     {
                       "key": {
+                        "symbol": "permissions"
+                      },
+                      "val": {
+                        "u32": 15
+                      }
+                    },
+                    {
+                      "key": {
                         "symbol": "resolver"
                       },
                       "val": {
@@ -898,6 +906,14 @@
                   },
                   {
                     "key": {
+                      "symbol": "permissions"
+                    },
+                    "val": {
+                      "u32": 15
+                    }
+                  },
+                  {
+                    "key": {
                       "symbol": "resolver"
                     },
                     "val": {
@@ -936,7 +952,7 @@
           },
           "ext": "v0"
         },
-        "live_until": 4095
+        "live_until": 100000
       },
       {
         "entry": {
