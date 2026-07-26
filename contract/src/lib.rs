@@ -688,6 +688,23 @@ pub struct FlashSwapExecution {
 }
 
 #[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct RandomSeedRotation {
+    pub current_seed: BytesN<32>,
+    pub last_updated_ledger: u32,
+    pub last_updated_timestamp: u64,
+}
+
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct InsuranceSolvencyReport {
+    pub total_vault_balance: i128,
+    pub target_reserve: i128,
+    pub solvency_ratio_bps: u32,
+    pub is_solvent: bool,
+}
+
+#[contracttype]
 pub enum DataKey {
     Guardians,
     PauseSignatures,
@@ -759,19 +776,22 @@ pub enum DataKey {
     TaskDynamicBounty(u64),
     FlashSwapRecord(u64),
     FlashSwapCounter,
+    KeeperRandomSeed,
+    InsuranceVaultBalance,
+    InsuranceTargetReserve,
 }
 
 fn enter_security_guard(env: &Env) {
     let key = DataKey::ReentrancyLock;
-    if env.storage().temporary().has(&key) {
-        panic!("Reentrancy guard triggered");
+    if env.storage().instance().has(&key) {
+        panic_with_error!(env, Error::ReentrantCall);
     }
-    env.storage().temporary().set(&key, &true);
+    env.storage().instance().set(&key, &true);
 }
 
 fn exit_security_guard(env: &Env) {
     let key = DataKey::ReentrancyLock;
-    env.storage().temporary().remove(&key);
+    env.storage().instance().remove(&key);
 }
 
 /// Deterministic fingerprint for a task's identifying parameters, scoped per
@@ -5228,7 +5248,7 @@ impl SoroTaskContract {
 
     /// Soroban DEX flash swap callback handler
     pub fn on_flash_swap_callback(
-        env: Env,
+        _env: Env,
         sender: Address,
         amount: i128,
         fee: i128,
@@ -5236,6 +5256,259 @@ impl SoroTaskContract {
     ) -> i128 {
         sender.require_auth();
         amount + fee
+    }
+
+    // ============================================================================
+    // Verifiable Random Seed Rotation for Keeper Lotteries (Issue #889)
+    // ============================================================================
+
+    /// Rotates the rolling entropy seed using ledger sequence, timestamp, and previous seed.
+    pub fn rotate_keeper_random_seed(env: Env) -> BytesN<32> {
+        enter_security_guard(&env);
+        let seq = env.ledger().sequence();
+        let ts = env.ledger().timestamp();
+        let prev_seed = env
+            .storage()
+            .instance()
+            .get::<DataKey, RandomSeedRotation>(&DataKey::KeeperRandomSeed)
+            .map(|r| r.current_seed)
+            .unwrap_or_else(|| BytesN::from_array(&env, &[0u8; 32]));
+
+        let mut buf = Bytes::new(&env);
+        buf.append(&prev_seed.to_bytes());
+        buf.append(&seq.to_xdr(&env));
+        buf.append(&ts.to_xdr(&env));
+
+        let new_seed: BytesN<32> = env.crypto().sha256(&buf).into();
+
+        let rotation = RandomSeedRotation {
+            current_seed: new_seed.clone(),
+            last_updated_ledger: seq,
+            last_updated_timestamp: ts,
+        };
+
+        env.storage()
+            .instance()
+            .set(&DataKey::KeeperRandomSeed, &rotation);
+
+        env.events().publish(
+            (
+                Symbol::new(&env, "KeeperSeedRotated"),
+                Symbol::new(&env, "v1"),
+            ),
+            new_seed.clone(),
+        );
+
+        exit_security_guard(&env);
+        new_seed
+    }
+
+    /// Retrieves the current rolling random seed.
+    pub fn get_keeper_random_seed(env: Env) -> BytesN<32> {
+        env.storage()
+            .instance()
+            .get::<DataKey, RandomSeedRotation>(&DataKey::KeeperRandomSeed)
+            .map(|r| r.current_seed)
+            .unwrap_or_else(|| BytesN::from_array(&env, &[0u8; 32]))
+    }
+
+    /// Selects a winning keeper pseudo-randomly for high-value task queues via seed entropy.
+    pub fn select_keeper_via_lottery(env: Env, task_id: u64, keepers: Vec<Address>) -> Address {
+        enter_security_guard(&env);
+        if keepers.is_empty() {
+            panic_with_error!(&env, Error::InvalidPayload);
+        }
+
+        let seed = Self::get_keeper_random_seed(env.clone());
+        let mut buf = Bytes::new(&env);
+        buf.append(&seed.to_bytes());
+        buf.append(&task_id.to_xdr(&env));
+
+        let hash: BytesN<32> = env.crypto().sha256(&buf).into();
+        let hash_arr = hash.to_array();
+        let index = (hash_arr[0] as u32) % keepers.len();
+
+        let selected = keepers.get(index).unwrap();
+
+        env.events().publish(
+            (
+                Symbol::new(&env, "KeeperLotteryWinnerSelected"),
+                Symbol::new(&env, "v1"),
+                task_id,
+            ),
+            selected.clone(),
+        );
+
+        exit_security_guard(&env);
+        selected
+    }
+
+    // ============================================================================
+    // Off-Chain Signed Permit Execution (ERC-2612 Style) (Issue #890)
+    // ============================================================================
+
+    /// Gasless task registration using Ed25519 off-chain signed permit.
+    pub fn register_with_permit(
+        env: Env,
+        signature: BytesN<64>,
+        task_config: TaskConfig,
+        deadline: u64,
+        public_key: BytesN<32>,
+    ) -> u64 {
+        enter_security_guard(&env);
+
+        if env.ledger().timestamp() > deadline {
+            panic_with_error!(&env, Error::OracleTimeout);
+        }
+
+        let mut payload = Bytes::new(&env);
+        payload.append(&task_config.creator.clone().to_xdr(&env));
+        payload.append(&task_config.target.clone().to_xdr(&env));
+        payload.append(&task_config.function.clone().to_xdr(&env));
+        payload.append(&task_config.interval.to_xdr(&env));
+        payload.append(&deadline.to_xdr(&env));
+
+        env.crypto()
+            .ed25519_verify(&public_key, &payload, &signature);
+
+        let counter: u64 = env
+            .storage()
+            .instance()
+            .get(&DataKey::Counter)
+            .unwrap_or(0);
+        let task_id = counter + 1;
+
+        if task_config.interval == 0 {
+            panic_with_error!(&env, Error::InvalidInterval);
+        }
+
+        let fp = task_fingerprint(
+            &env,
+            &task_config.creator,
+            &task_config.target,
+            &task_config.function,
+            &task_config.args,
+            task_config.interval as u64,
+        );
+        let fp_key = DataKey::TaskFingerprint(fp);
+        if env.storage().persistent().has(&fp_key) {
+            panic_with_error!(&env, Error::DuplicateTask);
+        }
+        env.storage().persistent().set(&fp_key, &task_id);
+
+        env.storage()
+            .persistent()
+            .set(&DataKey::Task(task_id), &task_config);
+        env.storage().persistent().set(
+            &DataKey::TaskStatus(task_id),
+            &TaskExecutionStatus {
+                outcome: ExecutionOutcome::NeverRun,
+                completed_at: 0,
+                run_count: 0,
+            },
+        );
+        env.storage().instance().set(&DataKey::Counter, &task_id);
+
+        let mut active_tasks = get_active_task_ids(&env);
+        active_tasks.push_back(task_id);
+        env.storage()
+            .instance()
+            .set(&DataKey::ActiveTasks, &active_tasks);
+
+        env.events().publish(
+            (
+                Symbol::new(&env, "TaskRegisteredWithPermit"),
+                Symbol::new(&env, "v1"),
+                task_id,
+            ),
+            task_config.creator.clone(),
+        );
+
+        exit_security_guard(&env);
+        task_id
+    }
+
+    // ============================================================================
+    // Automated Insurance Vault Auto-Refill from Excess Protocol Profits (Issue #891)
+    // ============================================================================
+
+    /// Diverts 15% protocol fee share to dedicated Insurance Vault storage upon task execution.
+    pub fn refill_insurance_from_profit(env: Env, protocol_profit: i128) -> i128 {
+        enter_security_guard(&env);
+        if protocol_profit <= 0 {
+            exit_security_guard(&env);
+            return 0;
+        }
+
+        let refill_amount = (protocol_profit * 15) / 100;
+        let current_bal: i128 = env
+            .storage()
+            .instance()
+            .get(&DataKey::InsuranceVaultBalance)
+            .unwrap_or(0);
+
+        let new_bal = current_bal + refill_amount;
+        env.storage()
+            .instance()
+            .set(&DataKey::InsuranceVaultBalance, &new_bal);
+
+        env.events().publish(
+            (
+                Symbol::new(&env, "InsuranceVaultRefilled"),
+                Symbol::new(&env, "v1"),
+            ),
+            (protocol_profit, refill_amount, new_bal),
+        );
+
+        exit_security_guard(&env);
+        refill_amount
+    }
+
+    /// Configures target reserve and returns updated solvency report.
+    pub fn auto_balance_insurance_vault(
+        env: Env,
+        target_reserve: i128,
+    ) -> InsuranceSolvencyReport {
+        enter_security_guard(&env);
+        env.storage()
+            .instance()
+            .set(&DataKey::InsuranceTargetReserve, &target_reserve);
+        exit_security_guard(&env);
+        Self::get_insurance_vault_solvency(env)
+    }
+
+    /// Generates automated solvency reporting metrics for the insurance vault.
+    pub fn get_insurance_vault_solvency(env: Env) -> InsuranceSolvencyReport {
+        let balance: i128 = env
+            .storage()
+            .instance()
+            .get(&DataKey::InsuranceVaultBalance)
+            .unwrap_or(0);
+
+        let target: i128 = env
+            .storage()
+            .instance()
+            .get(&DataKey::InsuranceTargetReserve)
+            .unwrap_or(0);
+
+        let is_solvent = balance >= target;
+        let solvency_ratio_bps = if target == 0 {
+            10_000u32
+        } else {
+            let ratio = (balance * 10_000) / target;
+            if ratio > 10_000 {
+                10_000u32
+            } else {
+                ratio as u32
+            }
+        };
+
+        InsuranceSolvencyReport {
+            total_vault_balance: balance,
+            target_reserve: target,
+            solvency_ratio_bps,
+            is_solvent,
+        }
     }
 }
 
@@ -8380,6 +8653,83 @@ pub(crate) mod tests {
         // Cancel should fail because PERM_CAN_CANCEL (4) is not set
         let cancel_res = client.try_cancel_task(&task_id);
         assert!(cancel_res.is_err());
+    }
+
+    #[test]
+    fn test_reentrancy_guard_instance_storage() {
+        let env = Env::default();
+        env.mock_all_auths();
+
+        let contract_id = env.register_contract(None, SoroTaskContract);
+        let client = SoroTaskContractClient::new(&env, &contract_id);
+
+        let target = env.register(MockTarget, ());
+        let config = base_config(&env, target.clone());
+        let task_id = client.register(&config);
+
+        // Simulated cross-contract re-entrant call should be rejected with Error::ReentrantCall
+        let res = env.as_contract(&contract_id, || {
+            enter_security_guard(&env);
+            let result = client.try_pause_task(&task_id);
+            exit_security_guard(&env);
+            result
+        });
+
+        assert!(res.is_err());
+    }
+
+    #[test]
+    fn test_verifiable_random_seed_rotation_and_lottery() {
+        let env = Env::default();
+        env.mock_all_auths();
+
+        let contract_id = env.register_contract(None, SoroTaskContract);
+        let client = SoroTaskContractClient::new(&env, &contract_id);
+
+        let seed1 = client.rotate_keeper_random_seed();
+        let fetched_seed = client.get_keeper_random_seed();
+        assert_eq!(seed1, fetched_seed);
+
+        env.ledger().with_mut(|l| {
+            l.sequence_number += 10;
+            l.timestamp += 100;
+        });
+
+        let seed2 = client.rotate_keeper_random_seed();
+        assert_ne!(seed1, seed2);
+
+        let keeper1 = Address::generate(&env);
+        let keeper2 = Address::generate(&env);
+        let mut keepers = Vec::new(&env);
+        keepers.push_back(keeper1.clone());
+        keepers.push_back(keeper2.clone());
+
+        let winner = client.select_keeper_via_lottery(&42u64, &keepers);
+        assert!(winner == keeper1 || winner == keeper2);
+    }
+
+    #[test]
+    fn test_insurance_vault_auto_refill_and_solvency() {
+        let env = Env::default();
+        env.mock_all_auths();
+
+        let contract_id = env.register_contract(None, SoroTaskContract);
+        let client = SoroTaskContractClient::new(&env, &contract_id);
+
+        let refill = client.refill_insurance_from_profit(&1_000i128);
+        assert_eq!(refill, 150i128);
+
+        let report = client.auto_balance_insurance_vault(&200i128);
+        assert_eq!(report.total_vault_balance, 150i128);
+        assert_eq!(report.target_reserve, 200i128);
+        assert!(!report.is_solvent);
+        assert_eq!(report.solvency_ratio_bps, 7500u32);
+
+        client.refill_insurance_from_profit(&500i128);
+        let updated_report = client.get_insurance_vault_solvency();
+        assert_eq!(updated_report.total_vault_balance, 225i128);
+        assert!(updated_report.is_solvent);
+        assert_eq!(updated_report.solvency_ratio_bps, 10_000u32);
     }
 }
 
