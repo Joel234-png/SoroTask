@@ -49,6 +49,7 @@ proptest! {
             whitelist: Vec::new(&env),
             is_active: false, // The register function sets this to true
             blocked_by: Vec::new(&env),
+            permissions: 15,
         };
 
         let task_id = client.register(&config);
@@ -82,6 +83,7 @@ proptest! {
             whitelist: Vec::new(&env),
             is_active: false,
             blocked_by: Vec::new(&env),
+            permissions: 15,
         };
 
         let task_id = client.register(&config);
@@ -134,6 +136,7 @@ proptest! {
             whitelist: Vec::new(&env),
             is_active: false,
             blocked_by: Vec::new(&env),
+            permissions: 15,
         };
 
         let task_id = client.register(&config);
