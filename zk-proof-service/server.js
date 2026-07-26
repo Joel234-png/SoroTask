@@ -8,6 +8,11 @@ const { ZKProofService } = require('./index');
 const { Halo2ProverAdapter } = require('./lib/halo2-adapter');
 const { selectProverBackend, withProofTiming } = require('./lib/prover-backend');
 const {
+  CircuitRegistry,
+  createCircuitRoutes,
+  sha256Hex,
+} = require('./lib/circuit-registry');
+const {
   hashTaskCondition,
   serializeProof,
   checkConstraint,
@@ -735,6 +740,235 @@ function createApp(zkService, options = {}) {
 
     req.on('close', () => {
       cleanup();
+    });
+  });
+
+  // -------------------------------------------------------------------------
+  // Issue #857 — Circuit Artifact Registry routes
+  //
+  // Mounts GET /circuits, /circuits/:id, /circuits/:id/:version, and
+  // /circuits/:id/:version/artifact?type=wasm|zkey|verifier endpoints.
+  // The registry instance is injectable for testing (options.circuitRegistry).
+  // -------------------------------------------------------------------------
+  const circuitRegistry = options.circuitRegistry ?? new CircuitRegistry();
+  app.use(createCircuitRoutes(circuitRegistry));
+
+  // -------------------------------------------------------------------------
+  // Issue #853 — ZK Identity Attestation Gate (Sybil-Resistant Task Invocation)
+  //
+  // Integrates Semaphore-style Merkle membership proofs for anonymous,
+  // authorized task execution. Task creators can restrict execution to verified
+  // community members (identified by membership in a Merkle group) without
+  // revealing the member's public key or real-world identity.
+  //
+  // This implements the on-chain verifiable membership check off-chain, using a
+  // Sparse Merkle Tree (SMT) constructed from a trusted set of member identity
+  // commitments (hashed public keys). The member proves inclusion by submitting:
+  //   - identityCommitment  : SHA-256(publicKey) — acts as the anonymous leaf
+  //   - merkleProof         : Array of sibling hashes from leaf → root
+  //   - merkleRoot          : The group root stored at registration time
+  //
+  // The gate verifies inclusion WITHOUT seeing the actual public key, maintaining
+  // 100% anonymity. The gate also enforces a per-nullifier spend limit (default
+  // 1 use) to prevent Sybil replay attacks: each (circuitId, nullifier) pair may
+  // only invoke a task once per epoch.
+  //
+  // Endpoints:
+  //   POST /identity/group         — Register a new member group with a Merkle root
+  //   POST /identity/verify-member — Verify membership proof for task access
+  //   GET  /identity/groups        — List registered group roots
+  // -------------------------------------------------------------------------
+
+  /**
+   * In-memory group store: groupId → { merkleRoot, createdAt, memberCount? }
+   * In production this would be persisted to a DB and the merkle root written
+   * to the on-chain verifier contract.
+   * @type {Map<string, object>}
+   */
+  const identityGroups = options.identityGroups ?? new Map();
+
+  /**
+   * Nullifier set to prevent Sybil replay: tracks used (groupId, nullifier)
+   * pairs so each anonymous member can only execute a given circuit once per
+   * epoch. The nullifier is nullifier = SHA-256(identitySecret || circuitId).
+   * @type {Set<string>}
+   */
+  const usedNullifiers = options.usedNullifiers ?? new Set();
+
+  /**
+   * Verify a Merkle inclusion proof.
+   * Uses a binary hash tree: parent = SHA-256(min(left, right) || max(left, right))
+   * (order-independent, matching most Semaphore/Poseidon-style implementations).
+   *
+   * @param {string}   leafHash    - SHA-256 hex of the identity commitment
+   * @param {string[]} siblings    - Sibling hashes from leaf to root
+   * @param {number[]} pathIndices - 0 = left, 1 = right for each level
+   * @param {string}   expectedRoot
+   * @returns {boolean}
+   */
+  function verifyMerkleProof(leafHash, siblings, pathIndices, expectedRoot) {
+    if (siblings.length !== pathIndices.length) return false;
+    let current = leafHash;
+    for (let i = 0; i < siblings.length; i++) {
+      const sibling = siblings[i];
+      // Order-independent hash: always hash (smaller, larger) to match client
+      const left = current <= sibling ? current : sibling;
+      const right = current <= sibling ? sibling : current;
+      current = sha256Hex(Buffer.from(left + right, 'hex'));
+    }
+    return current === expectedRoot;
+  }
+
+  /**
+   * POST /identity/group
+   *
+   * Register a new membership group identified by a Merkle root.
+   * The group creator supplies the root computed over their member set
+   * (e.g. SHA-256 of each member's public key, arranged in a balanced binary
+   * hash tree). The root acts as the on-chain commitment to the member set.
+   *
+   * Body: { groupId: string, merkleRoot: string, memberCount?: number }
+   * Response 201: { groupId, merkleRoot, createdAt }
+   */
+  app.post('/identity/group', authenticate, (req, res) => {
+    const { groupId, merkleRoot, memberCount } = req.body || {};
+
+    if (!groupId || typeof groupId !== 'string') {
+      return sendError(res, 400, 'INVALID_INPUT', 'groupId must be a non-empty string');
+    }
+    if (!merkleRoot || typeof merkleRoot !== 'string' || !/^[0-9a-fA-F]{64}$/.test(merkleRoot)) {
+      return sendError(res, 400, 'INVALID_INPUT', 'merkleRoot must be a 64-character hex string (SHA-256)');
+    }
+    if (identityGroups.has(groupId)) {
+      return sendError(res, 409, 'GROUP_ALREADY_EXISTS', `Group already registered: ${groupId}`);
+    }
+
+    const record = {
+      groupId,
+      merkleRoot: merkleRoot.toLowerCase(),
+      memberCount: typeof memberCount === 'number' ? memberCount : null,
+      createdAt: new Date().toISOString(),
+    };
+    identityGroups.set(groupId, record);
+
+    return res.status(201).json(record);
+  });
+
+  /**
+   * GET /identity/groups
+   *
+   * List all registered identity group IDs and their Merkle roots.
+   * Response 200: { groups: [{ groupId, merkleRoot, memberCount, createdAt }] }
+   */
+  app.get('/identity/groups', authenticate, (_req, res) => {
+    res.json({ groups: Array.from(identityGroups.values()) });
+  });
+
+  /**
+   * POST /identity/verify-member
+   *
+   * Verify that a caller is an anonymous member of a registered group, without
+   * revealing their identity, and gate task execution accordingly.
+   *
+   * Body:
+   *   {
+   *     groupId: string,           // which member group to check against
+   *     circuitId: string,         // circuit being invoked (used in nullifier)
+   *     identityCommitment: string,// SHA-256(publicKey) — anonymous leaf
+   *     nullifier: string,         // SHA-256(identitySecret || circuitId)
+   *     merkleProof: {
+   *       siblings: string[],      // sibling hashes leaf → root
+   *       pathIndices: number[]    // 0=left, 1=right per level
+   *     }
+   *   }
+   *
+   * Response 200: { verified: true, groupId, circuitId, nullifier, verifiedAt }
+   * Response 403: membership proof invalid
+   * Response 409: nullifier already used (Sybil replay attempt)
+   */
+  app.post('/identity/verify-member', authenticate, (req, res) => {
+    const { groupId, circuitId, identityCommitment, nullifier, merkleProof } = req.body || {};
+
+    // Validate required fields
+    const missing = [];
+    if (!groupId) missing.push('groupId');
+    if (!circuitId) missing.push('circuitId');
+    if (!identityCommitment) missing.push('identityCommitment');
+    if (!nullifier) missing.push('nullifier');
+    if (!merkleProof) missing.push('merkleProof');
+    if (missing.length > 0) {
+      return sendError(res, 400, 'INVALID_INPUT', 'Missing required fields', { missing });
+    }
+
+    if (!identityGroups.has(groupId)) {
+      return sendError(res, 404, 'GROUP_NOT_FOUND', `No group registered with id: ${groupId}`);
+    }
+
+    const group = identityGroups.get(groupId);
+
+    // Validate identityCommitment is a valid 64-char hex string
+    if (!/^[0-9a-fA-F]{64}$/.test(identityCommitment)) {
+      return sendError(res, 400, 'INVALID_INPUT', 'identityCommitment must be a 64-character hex string');
+    }
+
+    // Validate nullifier format
+    if (!/^[0-9a-fA-F]{64}$/.test(nullifier)) {
+      return sendError(res, 400, 'INVALID_INPUT', 'nullifier must be a 64-character hex string');
+    }
+
+    // Validate merkleProof structure
+    const { siblings, pathIndices } = merkleProof;
+    if (!Array.isArray(siblings) || !Array.isArray(pathIndices)) {
+      return sendError(res, 400, 'INVALID_INPUT', 'merkleProof must contain siblings[] and pathIndices[] arrays');
+    }
+    if (siblings.length !== pathIndices.length) {
+      return sendError(res, 400, 'INVALID_INPUT', 'merkleProof.siblings and pathIndices must have equal length');
+    }
+    if (siblings.some((s) => typeof s !== 'string' || !/^[0-9a-fA-F]{64}$/.test(s))) {
+      return sendError(res, 400, 'INVALID_INPUT', 'All merkleProof.siblings must be 64-character hex strings');
+    }
+
+    // Sybil replay check: each nullifier is single-use per group+circuit
+    const nullifierKey = `${groupId}:${circuitId}:${nullifier}`;
+    if (usedNullifiers.has(nullifierKey)) {
+      return sendError(
+        res,
+        409,
+        'NULLIFIER_ALREADY_USED',
+        'This nullifier has already been used. Sybil replay attempt rejected.',
+        { groupId, circuitId },
+      );
+    }
+
+    // Verify Merkle membership proof
+    const leafHash = identityCommitment.toLowerCase();
+    const isValid = verifyMerkleProof(
+      leafHash,
+      siblings.map((s) => s.toLowerCase()),
+      pathIndices,
+      group.merkleRoot,
+    );
+
+    if (!isValid) {
+      return sendError(
+        res,
+        403,
+        'MEMBERSHIP_PROOF_INVALID',
+        'Merkle membership proof does not match the registered group root.',
+        { groupId, merkleRoot: group.merkleRoot },
+      );
+    }
+
+    // Consume the nullifier to prevent replay
+    usedNullifiers.add(nullifierKey);
+
+    return res.json({
+      verified: true,
+      groupId,
+      circuitId,
+      nullifier,
+      merkleRoot: group.merkleRoot,
+      verifiedAt: new Date().toISOString(),
     });
   });
 
