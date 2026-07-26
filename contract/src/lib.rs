@@ -65,6 +65,8 @@ pub enum Error {
     TaskNotFound = 36,
     InvalidUpgradeVersion = 37,
     DuplicateTask = 38,
+    BountyBelowMinimum = 40,
+    InvalidBounty = 39,
     BountyBelowMinimum = 39,
     InvalidBounty = 40,
     FeatureDisabled = 41,
@@ -1400,6 +1402,7 @@ impl SoroTaskContract {
             &config.target,
             &config.function,
             &config.args,
+            config.interval.into(),
             config.interval as u64,
         );
         let fingerprint_key = DataKey::TaskFingerprint(fingerprint.clone());
@@ -2490,14 +2493,14 @@ impl SoroTaskContract {
             Some(ref resolver_address) => {
                 let mut resolver_call_args = Vec::<Val>::new(env);
                 resolver_call_args.push_back(config.args.clone().into_val(env));
-                matches!(
-                    env.try_invoke_contract::<bool, soroban_sdk::Error>(
-                        resolver_address,
-                        &Symbol::new(env, "check_condition"),
-                        resolver_call_args,
-                    ),
-                    Ok(Ok(true))
-                )
+                match env.try_invoke_contract::<bool, soroban_sdk::Error>(
+                    resolver_address,
+                    &Symbol::new(env, "check_condition"),
+                    resolver_call_args,
+                ) {
+                    Ok(Ok(true)) => true,
+                    _ => false,
+                }
             }
             None => true,
         };
@@ -3138,6 +3141,7 @@ impl SoroTaskContract {
             &config.target,
             &config.function,
             &config.args,
+            config.interval.into(),
             config.interval as u64,
         );
         env.storage()
@@ -6720,6 +6724,7 @@ pub(crate) mod tests {
         // interval so none of them collide with the duplicate-registration check.
         for i in 1..=100u64 {
             let mut cfg = config.clone();
+            cfg.interval = 3600 + (i as u32);
             cfg.interval = 3600 + i as u32;
             let id = client.register(&cfg);
             assert_eq!(id, i, "Task {} should have ID {}", i, i);
@@ -6758,6 +6763,7 @@ pub(crate) mod tests {
         let mut ids = Vec::new(&env);
         for i in 0..50u64 {
             let mut cfg = config.clone();
+            cfg.interval = 3600 + (i as u32); // distinct per registration, not a duplicate
             cfg.interval = 3600 + i as u32; // distinct per registration, not a duplicate
             ids.push_back(client.register(&cfg));
         }
@@ -6862,6 +6868,7 @@ pub(crate) mod tests {
         let mut prev_id = 0u64;
         for i in 0..20u64 {
             let mut cfg = config.clone();
+            cfg.interval = 3600 + (i as u32); // distinct per registration, not a duplicate
             cfg.interval = 3600 + i as u32; // distinct per registration, not a duplicate
             let current_id = client.register(&cfg);
             assert!(
