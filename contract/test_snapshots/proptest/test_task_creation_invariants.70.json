@@ -54,7 +54,7 @@
                         "symbol": "gas_balance"
                       },
                       "val": {
-                        "i128": "5109640"
+                        "i128": "8444430"
                       }
                     },
                     {
@@ -62,7 +62,7 @@
                         "symbol": "interval"
                       },
                       "val": {
-                        "u64": "69406220"
+                        "u32": 90138939
                       }
                     },
                     {
@@ -79,6 +79,14 @@
                       },
                       "val": {
                         "u64": "0"
+                      }
+                    },
+                    {
+                      "key": {
+                        "symbol": "permissions"
+                      },
+                      "val": {
+                        "u32": 15
                       }
                     },
                     {
@@ -239,7 +247,7 @@
                       "symbol": "gas_balance"
                     },
                     "val": {
-                      "i128": "5109640"
+                      "i128": "8444430"
                     }
                   },
                   {
@@ -247,7 +255,7 @@
                       "symbol": "interval"
                     },
                     "val": {
-                      "u64": "69406220"
+                      "u32": 90138939
                     }
                   },
                   {
@@ -264,6 +272,14 @@
                     },
                     "val": {
                       "u64": "0"
+                    }
+                  },
+                  {
+                    "key": {
+                      "symbol": "permissions"
+                    },
+                    "val": {
+                      "u32": 15
                     }
                   },
                   {
@@ -295,6 +311,33 @@
                     "val": "void"
                   }
                 ]
+              }
+            }
+          },
+          "ext": "v0"
+        },
+        "live_until": 4095
+      },
+      {
+        "entry": {
+          "last_modified_ledger_seq": 0,
+          "data": {
+            "contract_data": {
+              "ext": "v0",
+              "contract": "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAD2KM",
+              "key": {
+                "vec": [
+                  {
+                    "symbol": "TaskFingerprint"
+                  },
+                  {
+                    "bytes": "0369f63ca9b13f56732a4f936b23aff9859c40226556bf12de0d68a8e23f067e"
+                  }
+                ]
+              },
+              "durability": "persistent",
+              "val": {
+                "bool": true
               }
             }
           },
@@ -372,7 +415,7 @@
                   "executable": {
                     "wasm": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
                   },
-                  "storage": null
+                  "storage": []
                 }
               }
             }

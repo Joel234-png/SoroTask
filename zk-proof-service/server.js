@@ -1,6 +1,17 @@
 const express = require('express');
+const rateLimit = require('express-rate-limit');
+const path = require('path');
+const OpenApiValidator = require('express-openapi-validator');
 const { ZKProofService } = require('./index');
-const { hashTaskCondition, serializeProof, checkConstraint } = require('./lib/helpers');
+const { Halo2ProverAdapter } = require('./lib/halo2-adapter');
+const { selectProverBackend, withProofTiming } = require('./lib/prover-backend');
+const {
+  hashTaskCondition,
+  serializeProof,
+  checkConstraint,
+  decryptWitnessECIES,
+  zeroizeBuffer,
+} = require('./lib/helpers');
 
 const SERVICE_VERSION = '1.0.0';
 
@@ -22,8 +33,8 @@ function validateGenerateRequest(body) {
   if (!body.taskCondition.type || body.taskCondition.params == null) {
     return { valid: false, message: 'taskCondition must include type and params' };
   }
-  if (!body.clientData.witness) {
-    return { valid: false, message: 'clientData.witness is required' };
+  if (!body.clientData.witness && !body.clientData.encryptedWitness) {
+    return { valid: false, message: 'clientData.witness or clientData.encryptedWitness is required' };
   }
   return { valid: true };
 }
@@ -45,15 +56,152 @@ function validateVerifyRequest(body) {
 
 /**
  * @param {ZKProofService} zkService
- * @param {{ apiToken?: string, version?: string, startTime?: number }} [options]
+ * @param {{ apiToken?: string, version?: string, startTime?: number, eciesPrivateKey?: string, disableOpenApiValidation?: boolean }} [options]
  */
+/**
+ * Creates an express-rate-limit store instance.
+ * By default uses the built-in MemoryStore.  In production, replace with a
+ * Redis-backed store (e.g. rate-limit-redis) to share state across replicas:
+ *
+ *   const RedisStore = require('rate-limit-redis');
+ *   const store = new RedisStore({ client: redisClient });
+ *   createApp(zkService, { rateLimitStore: store });
+ *
+ * @param {object} [store] - Optional rate-limit store instance.
+ * @returns {import('express-rate-limit').Store}
+ */
+function createRateLimitStore(store) {
+  return store ?? undefined; // undefined lets express-rate-limit use MemoryStore
+}
+
 function createApp(zkService, options = {}) {
   const app = express();
   const apiToken = options.apiToken ?? process.env.ZK_PROOF_API_TOKEN;
   const version = options.version ?? SERVICE_VERSION;
   const startTime = options.startTime ?? Date.now();
+  const eciesPrivateKey = options.eciesPrivateKey ?? process.env.ECIES_PRIVATE_KEY;
+
+  // halo2 proving gateway (Issue #851). Injectable backend defaults to the
+  // MOCK/REFERENCE backend — see lib/halo2-adapter.js for the honesty notice on
+  // why no real halo2 proving happens in this build.
+  const halo2Adapter = options.halo2Adapter ?? new Halo2ProverAdapter();
+
+  // Prover backend selection (Issue #850). Defaults to the CPU path with zero
+  // behaviour change. If PROVER_BACKEND is explicitly set to cuda|metal with no
+  // real GPU backend wired in, selectProverBackend() throws here so a
+  // misconfigured deployment fails fast at startup instead of silently running
+  // on CPU while believing it is GPU-accelerated.
+  const proverBackend = options.proverBackend ?? selectProverBackend({ gpuBackends: options.gpuBackends });
 
   app.use(express.json({ limit: '1mb' }));
+
+  // ---------------------------------------------------------------------------
+  // Rate limiting – /generate-proof: 15 requests per minute per IP address.
+  // On breach: HTTP 429 Too Many Requests + Retry-After header.
+  // ---------------------------------------------------------------------------
+  const generateProofLimiter = rateLimit({
+    windowMs: 60 * 1000, // 1-minute sliding window
+    max: 15,             // 15 proof requests per window per IP
+    standardHeaders: true,  // Emit RateLimit-* headers (draft-6)
+    legacyHeaders: false,
+    store: createRateLimitStore(options.rateLimitStore),
+    keyGenerator: (req) => req.ip,
+    handler: (_req, res) => {
+      const retryAfter = Math.ceil(60); // seconds until window resets
+      res.setHeader('Retry-After', retryAfter);
+      sendError(
+        res,
+        429,
+        'RATE_LIMIT_EXCEEDED',
+        'Too many proof requests. Please retry after ' + retryAfter + ' seconds.',
+      );
+    },
+  });
+  // ---------------------------------------------------------------------------
+  // halo2 proof gateway routes (Issue #851).
+  // Registered BEFORE the OpenAPI validator on purpose: these endpoints carry a
+  // `scheme` field (kzg | ipa) that the existing OpenAPI schemas do not model,
+  // and the Halo2ProverAdapter performs its own request validation. The proof
+  // objects are explicitly marked isMock:true — this is a gateway/contract layer,
+  // NOT a real halo2 prover (see lib/halo2-adapter.js).
+  // ---------------------------------------------------------------------------
+  app.post('/generate-proof/halo2', generateProofLimiter, authenticate, (req, res) => {
+    const startedAt = Date.now();
+    const body = req.body || {};
+    const { taskId, circuitId, scheme, taskCondition } = body;
+    const circuitInput = body.clientData?.witness ?? body.circuitInput;
+
+    if (taskId == null || !circuitId || !taskCondition) {
+      return sendError(res, 400, 'INVALID_INPUT', 'taskId, circuitId and taskCondition are required');
+    }
+
+    try {
+      const proof = halo2Adapter.generateProof({ scheme, circuitId, circuitInput });
+      const conditionHash = hashTaskCondition(taskCondition);
+      return res.json({
+        proofId: proof.proofId,
+        status: 'success',
+        taskId,
+        scheme: proof.scheme,
+        conditionHash,
+        proof,
+        backend: halo2Adapter.isMockBackend() ? 'mock-reference' : 'external',
+        isMock: halo2Adapter.isMockBackend(),
+        generatedAt: new Date().toISOString(),
+        processingTimeMs: Date.now() - startedAt,
+      });
+    } catch (error) {
+      if (error.code === 'INVALID_SCHEME' || error.code === 'INVALID_CIRCUIT_INPUT') {
+        return sendError(res, 400, error.code, error.message);
+      }
+      return sendError(res, 500, 'PROOF_GENERATION_FAILED', error.message);
+    }
+  });
+
+  app.post('/verify-proof/halo2', authenticate, (req, res) => {
+    const body = req.body || {};
+    const { taskId, circuitId, scheme, taskCondition, proof } = body;
+
+    if (taskId == null || !circuitId || !taskCondition || !proof) {
+      return sendError(res, 400, 'INVALID_INPUT', 'taskId, circuitId, taskCondition and proof are required');
+    }
+
+    try {
+      const result = halo2Adapter.verifyProof({ scheme, proof });
+      return res.json({
+        valid: result.valid,
+        proofId: proof.proofId,
+        taskId,
+        scheme: scheme.toLowerCase(),
+        conditionHash: hashTaskCondition(taskCondition),
+        isMock: halo2Adapter.isMockBackend(),
+        verifiedAt: new Date().toISOString(),
+        verificationDetails: {
+          circuitId,
+          reason: result.reason,
+          note: 'Structural verification only — mock backend does not verify ZK soundness.',
+        },
+      });
+    } catch (error) {
+      if (error.code === 'INVALID_SCHEME' || error.code === 'INVALID_CIRCUIT_INPUT') {
+        return sendError(res, 400, error.code, error.message);
+      }
+      return sendError(res, 500, 'PROOF_VERIFICATION_FAILED', error.message);
+    }
+  });
+
+  // OpenAPI v3 Schema Validation Middleware
+  if (!options.disableOpenApiValidation) {
+    const apiSpec = path.join(__dirname, 'openapi.yaml');
+    app.use(
+      OpenApiValidator.middleware({
+        apiSpec,
+        validateRequests: true,
+        validateResponses: false,
+        ignorePaths: (pathStr) => pathStr === '/health',
+      }),
+    );
+  }
 
   function authenticate(req, res, next) {
     if (!apiToken) return next();
@@ -79,7 +227,7 @@ function createApp(zkService, options = {}) {
     });
   });
 
-  app.post('/generate-proof', authenticate, async (req, res) => {
+  app.post('/generate-proof', generateProofLimiter, authenticate, async (req, res) => {
     const startedAt = Date.now();
     const validation = validateGenerateRequest(req.body || {});
     if (!validation.valid) {
@@ -95,20 +243,42 @@ function createApp(zkService, options = {}) {
       return sendError(res, 503, 'SERVICE_NOT_READY', 'ZK proof worker pool is not initialized');
     }
 
-    const { taskId, circuitId, taskCondition, clientData } = req.body;
-    const constraint = checkConstraint(taskCondition, clientData, circuitId);
-    if (!constraint.ok) {
-      return sendError(
-        res,
-        422,
-        'CONSTRAINT_UNSATISFIED',
-        'Client witness does not satisfy task condition constraints',
-        constraint.details,
-      );
+    let { taskId, circuitId, taskCondition, clientData } = req.body;
+    let witnessBuffer = null;
+
+    // Handle ECIES Encrypted Witness Transport if encryptedWitness is provided
+    if (clientData.encryptedWitness) {
+      if (!eciesPrivateKey) {
+        return sendError(res, 400, 'INVALID_INPUT', 'ECIES private key not configured on server');
+      }
+      try {
+        const decrypted = decryptWitnessECIES(clientData.encryptedWitness, eciesPrivateKey);
+        clientData = { ...clientData, witness: decrypted.witness };
+        witnessBuffer = decrypted.decryptedBuffer;
+      } catch (err) {
+        return sendError(res, 400, 'INVALID_INPUT', `ECIES witness decryption failed: ${err.message}`);
+      }
     }
 
     try {
-      const rawProof = await zkService.generateProof(taskCondition, clientData);
+      const constraint = checkConstraint(taskCondition, clientData, circuitId);
+      if (!constraint.ok) {
+        return sendError(
+          res,
+          422,
+          'CONSTRAINT_UNSATISFIED',
+          'Client witness does not satisfy task condition constraints',
+          constraint.details,
+        );
+      }
+
+      // Wrap the real (CPU) proof generation in the timing harness so there is
+      // an apples-to-apples wall-clock baseline for a future GPU backend (#850).
+      const timed = await withProofTiming(
+        () => zkService.generateProof(taskCondition, clientData),
+        { backend: proverBackend.backend, label: 'groth16-generate-proof' },
+      );
+      const rawProof = timed.result;
       const conditionHash = hashTaskCondition(taskCondition);
       const proof = {
         pi_a: rawProof.pi_a,
@@ -124,6 +294,9 @@ function createApp(zkService, options = {}) {
         conditionHash,
         proof,
         serializedProof: serializeProof(proof),
+        proverBackend: proverBackend.backend,
+        accelerated: proverBackend.accelerated,
+        generationTimeMs: timed.durationMs,
         generatedAt: new Date().toISOString(),
         processingTimeMs: Date.now() - startedAt,
       });
@@ -135,6 +308,11 @@ function createApp(zkService, options = {}) {
         return sendError(res, 400, 'INVALID_INPUT', error.message);
       }
       return sendError(res, 500, 'PROOF_GENERATION_FAILED', error.message);
+    } finally {
+      // Zero out decrypted witness buffer immediately after proof generation
+      if (witnessBuffer) {
+        zeroizeBuffer(witnessBuffer);
+      }
     }
   });
 
@@ -179,6 +357,122 @@ function createApp(zkService, options = {}) {
     }
   });
 
+  // OpenAPI Validation Error Handler
+  app.use((err, _req, res, next) => {
+    if (err.status || err.errors) {
+      return sendError(
+        res,
+        err.status || 400,
+        'INVALID_INPUT',
+        err.message || 'Validation error',
+        err.errors || [],
+      );
+    }
+    next(err);
+  });
+
+  app.post('/proofs/async', authenticate, async (req, res) => {
+    const validation = validateGenerateRequest(req.body || {});
+    if (!validation.valid) {
+      if (validation.missingFields) {
+        return sendError(res, 400, 'INVALID_INPUT', 'taskCondition and clientData are required', {
+          missingFields: validation.missingFields,
+        });
+      }
+      return sendError(res, 400, 'INVALID_INPUT', validation.message);
+    }
+
+    if (!zkService.isReady) {
+      return sendError(res, 503, 'SERVICE_NOT_READY', 'ZK proof worker pool is not initialized');
+    }
+
+    const { taskId, circuitId, taskCondition, clientData } = req.body;
+    const constraint = checkConstraint(taskCondition, clientData, circuitId);
+    if (!constraint.ok) {
+      return sendError(
+        res,
+        422,
+        'CONSTRAINT_UNSATISFIED',
+        'Client witness does not satisfy task condition constraints',
+        constraint.details,
+      );
+    }
+
+    try {
+      const asyncJob = zkService.enqueueAsyncJob(taskCondition, clientData);
+      return res.status(202).json({
+        jobId: asyncJob.jobId,
+        status: asyncJob.status,
+        taskId,
+        createdAt: asyncJob.createdAt,
+      });
+    } catch (error) {
+      return sendError(res, 500, 'PROOF_ASYNC_ENQUEUE_FAILED', error.message);
+    }
+  });
+
+  app.get('/proofs/:job_id/stream', (req, res) => {
+    const { job_id: jobId } = req.params;
+
+    res.setHeader('Content-Type', 'text/event-stream');
+    res.setHeader('Cache-Control', 'no-cache');
+    res.setHeader('Connection', 'keep-alive');
+
+    const job = zkService.getAsyncJob(jobId);
+    if (!job) {
+      res.write(`event: error\ndata: ${JSON.stringify({ error: 'Job not found', jobId })}\n\n`);
+      return res.end();
+    }
+
+    res.write(`event: status\ndata: ${JSON.stringify({ jobId: job.jobId, status: job.status, progress: job.progress })}\n\n`);
+
+    if (job.status === 'completed') {
+      res.write(`event: complete\ndata: ${JSON.stringify(job.result)}\n\n`);
+      return res.end();
+    }
+
+    if (job.status === 'failed') {
+      res.write(`event: error\ndata: ${JSON.stringify({ jobId: job.jobId, error: job.error })}\n\n`);
+      return res.end();
+    }
+
+    const onProgress = (data) => {
+      if (data.jobId === jobId) {
+        res.write(`event: progress\ndata: ${JSON.stringify(data)}\n\n`);
+      }
+    };
+
+    const onComplete = (completedJob) => {
+      if (completedJob.jobId === jobId) {
+        res.write(`event: complete\ndata: ${JSON.stringify(completedJob.result)}\n\n`);
+        cleanup();
+        res.end();
+      }
+    };
+
+    const onError = (failedJob) => {
+      if (failedJob.jobId === jobId) {
+        res.write(`event: error\ndata: ${JSON.stringify({ jobId, error: failedJob.error })}\n\n`);
+        cleanup();
+        res.end();
+      }
+    };
+
+    const cleanup = () => {
+      zkService.removeListener('jobProgress', onProgress);
+      zkService.removeListener('jobComplete', onComplete);
+      zkService.removeListener('jobError', onError);
+    };
+
+    zkService.on('jobProgress', onProgress);
+    zkService.on('jobComplete', onComplete);
+    zkService.on('jobError', onError);
+
+    req.on('close', () => {
+      cleanup();
+    });
+  });
+
   return app;
 }
 
@@ -201,4 +495,4 @@ if (require.main === module) {
   });
 }
 
-module.exports = { createApp, createServer };
+module.exports = { createApp, createServer, createRateLimitStore };

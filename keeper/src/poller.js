@@ -1,5 +1,6 @@
 const { Contract, xdr, TransactionBuilder, BASE_FEE, Networks, scValToNative } = require('@stellar/stellar-sdk');
 const { createRateLimiter } = require('./concurrency');
+const { DistributedRateLimiter } = require('./distributedRateLimiter');
 const { createLogger } = require('./logger');
 const { validateTaskPayload } = require('./taskValidator');
 const { TaskFilterChain } = require('./taskFilter');
@@ -88,6 +89,23 @@ class TaskPoller {
           this.metricsServer.increment('throttledRequestsTotal', { name: event.name });
         }
       },
+    });
+
+    // Cluster-wide (distributed) RPC rate limiter — Issue #849.
+    // This gates RPC reads across ALL keeper processes via Redis, enforcing a
+    // single global budget. It composes with (does not replace) the per-process
+    // `readLimit` above: the local limiter protects against a single process's
+    // burst, the distributed one enforces the cluster-wide global limit.
+    // If REDIS_URL is unset it is a no-op passthrough (see distributedRateLimiter.js),
+    // so single-instance/dev deployments are unaffected.
+    this.distributedReadLimit = options.distributedRateLimiter || new DistributedRateLimiter({
+      redis: options.redisClient || null,
+      redisUrl: options.redisUrl !== undefined ? options.redisUrl : process.env.REDIS_URL,
+      limit: parseInt(
+        options.rpcGlobalRateLimit || process.env.RPC_GLOBAL_RATE_LIMIT || '100',
+        10,
+      ),
+      logger: this.logger,
     });
 
     // Statistics
@@ -270,6 +288,9 @@ class TaskPoller {
         this.readLimit(async () => {
           const startedAt = Date.now();
           const correlationId = `poll-${taskId}-${crypto.randomBytes(4).toString('hex')}`;
+          // Cluster-wide gate: wait for a global RPC token before issuing the
+          // per-task read. No-op passthrough when Redis is not configured.
+          await this.distributedReadLimit.acquire();
           const preloaded = preloadedConfigs ? preloadedConfigs.get(Number(taskId)) : undefined;
           const result = await this.checkTask(
             taskId,
