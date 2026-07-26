@@ -189,6 +189,8 @@ class KeeperP2PNetwork extends EventEmitter {
     this.seenNonces = new Set();
     this.heartbeatTimer = null;
     this.pruneTimer = null;
+    // Issue #841: active bid auction state — keyed by taskId
+    this.activeBids = new Map();
   }
 
   async start() {
@@ -276,6 +278,16 @@ class KeeperP2PNetwork extends EventEmitter {
     socket.on('keeper:hello:ack', (envelope) => this.handleEnvelope(socket, envelope));
     socket.on('keeper:heartbeat', (envelope) => this.handleEnvelope(socket, envelope));
     socket.on('keeper:peers', (envelope) => this.handleEnvelope(socket, envelope));
+    // Issue #841: receive incoming fee bids from peer keepers
+    socket.on('keeper:bid', (envelope) => {
+      const verification = this.verify(envelope);
+      if (!verification.ok) {
+        this.logger.warn('Rejected invalid bid envelope', { reason: verification.reason });
+        return;
+      }
+      this._recordBid(envelope);
+      this.emit('bid:received', { nodeId: envelope.nodeId, payload: envelope.payload });
+    });
     socket.on('disconnect', () => {
       const nodeId = socket.data?.nodeId;
       if (nodeId && this.peers.has(nodeId)) {
@@ -468,6 +480,9 @@ class KeeperP2PNetwork extends EventEmitter {
       this.logger.warn('Pruned stale P2P peer', { nodeId });
     });
 
+    // Also prune expired bid auction entries (Issue #841)
+    this.pruneExpiredBids(now);
+
     return stale;
   }
 
@@ -551,10 +566,170 @@ class KeeperP2PNetwork extends EventEmitter {
     const sortedClaims = peersClaims.sort((a, b) => a.timestamp - b.timestamp);
     return sortedClaims[0]?.nodeId === this.nodeId;
   }
+
+  // ---------------------------------------------------------------------------
+  // Decentralized Task Bidding Auction Engine (Issue #841)
+  //
+  // Keepers compete off-chain for task execution rights using a signed fee-bid
+  // protocol broadcast over the P2P pubsub channel. The keeper with the lowest
+  // fee bid wins exclusive execution rights for a 5-ledger window (~25 seconds
+  // on Stellar). This eliminates redundant on-chain gas wars when multiple
+  // keepers are all racing to execute the same due task.
+  //
+  // Protocol flow:
+  //   1. Each keeper calls broadcastBid(taskId, feeLumens) to announce its fee.
+  //   2. All peers receive bid envelopes via 'keeper:bid' socket events and
+  //      store them in this.activeBids (keyed by taskId).
+  //   3. After BID_COLLECTION_WINDOW_MS the auction resolves: the keeper with
+  //      the lowest fee wins. Ties are broken deterministically by nodeId.
+  //   4. Only the winner proceeds to call execute() on-chain; all other keepers
+  //      skip this task for the current cycle, eliminating redundant gas spend.
+  // ---------------------------------------------------------------------------
+
+  /**
+   * Broadcast a signed fee bid for a specific task over the P2P network.
+   *
+   * @param {string|number} taskId - The task being bid on.
+   * @param {number} feeLumens - Proposed transaction fee in stroops (1 XLM = 10^7 stroops).
+   * @param {number} [now] - Override for current timestamp (testing).
+   */
+  broadcastBid(taskId, feeLumens, now = Date.now()) {
+    if (!this.enabled || !this.started) {
+      return;
+    }
+
+    const bid = this.sign('task_bid', {
+      taskId: String(taskId),
+      feeLumens: Number(feeLumens),
+      // Ledger window: bid is valid for 5 Stellar ledgers (~25 seconds).
+      expiresAt: now + KeeperBidAuction.BID_WINDOW_MS,
+    });
+
+    // Record our own bid locally before broadcasting.
+    this._recordBid(bid);
+
+    if (this.io) {
+      this.io.emit('keeper:bid', bid);
+    }
+    this.sockets.forEach((socket) => {
+      if (socket.connected) {
+        socket.emit('keeper:bid', bid);
+      }
+    });
+
+    this.logger.debug('Bid broadcast', {
+      taskId,
+      feeLumens,
+      nodeId: this.nodeId,
+    });
+  }
+
+  /**
+   * @private
+   * Record an incoming or local bid in this.activeBids.
+   * Bids are grouped by taskId and stored per nodeId (last-write wins per node).
+   */
+  _recordBid(envelope) {
+    if (!envelope || !envelope.payload) return;
+    const { taskId, feeLumens, expiresAt } = envelope.payload;
+    if (taskId == null || feeLumens == null) return;
+
+    const key = String(taskId);
+    if (!this.activeBids.has(key)) {
+      this.activeBids.set(key, new Map());
+    }
+    this.activeBids.get(key).set(envelope.nodeId, {
+      nodeId: envelope.nodeId,
+      feeLumens: Number(feeLumens),
+      expiresAt: Number(expiresAt) || 0,
+      receivedAt: Date.now(),
+    });
+  }
+
+  /**
+   * Resolve the auction winner for a task and determine whether this node
+   * has won the right to execute it.
+   *
+   * Call this after broadcastBid() + BID_COLLECTION_WINDOW_MS to let all
+   * peers' bids arrive before resolving. Returns true if this node won.
+   *
+   * @param {string|number} taskId
+   * @param {number} [now] - Override for timestamp (testing).
+   * @returns {{ won: boolean, winner: string|null, winningFee: number|null, bidCount: number }}
+   */
+  resolveAuction(taskId, now = Date.now()) {
+    const key = String(taskId);
+    const bids = this.activeBids.get(key);
+
+    if (!bids || bids.size === 0) {
+      // No peers bid — we win by default.
+      return { won: true, winner: this.nodeId, winningFee: null, bidCount: 0 };
+    }
+
+    // Filter out expired bids.
+    const valid = Array.from(bids.values()).filter((bid) => bid.expiresAt > now);
+
+    if (valid.length === 0) {
+      return { won: true, winner: this.nodeId, winningFee: null, bidCount: 0 };
+    }
+
+    // Sort ascending by fee, break ties deterministically by nodeId (lexicographic).
+    valid.sort((a, b) => {
+      if (a.feeLumens !== b.feeLumens) return a.feeLumens - b.feeLumens;
+      return a.nodeId < b.nodeId ? -1 : 1;
+    });
+
+    const winner = valid[0];
+    const won = winner.nodeId === this.nodeId;
+
+    if (!won) {
+      this.logger.debug('Auction lost — deferring execution to winner', {
+        taskId,
+        winner: winner.nodeId,
+        winningFee: winner.feeLumens,
+        ourNodeId: this.nodeId,
+      });
+    }
+
+    return {
+      won,
+      winner: winner.nodeId,
+      winningFee: winner.feeLumens,
+      bidCount: valid.length,
+    };
+  }
+
+  /**
+   * Clean up expired bid records to prevent unbounded memory growth.
+   * Called automatically by the internal prune timer.
+   */
+  pruneExpiredBids(now = Date.now()) {
+    for (const [taskId, bids] of this.activeBids) {
+      for (const [nodeId, bid] of bids) {
+        if (bid.expiresAt <= now) {
+          bids.delete(nodeId);
+        }
+      }
+      if (bids.size === 0) {
+        this.activeBids.delete(taskId);
+      }
+    }
+  }
 }
+
+/**
+ * Auction constants shared between KeeperP2PNetwork methods and external callers.
+ */
+const KeeperBidAuction = {
+  /** 5 Stellar ledgers ≈ 25 seconds. Bid validity window. */
+  BID_WINDOW_MS: 25000,
+  /** Collection window before resolving auction winner. */
+  BID_COLLECTION_WINDOW_MS: 5000,
+};
 
 module.exports = {
   KeeperP2PNetwork,
+  KeeperBidAuction,
   assignTasksByRendezvous,
   createSignedEnvelope,
   parsePeerList,
