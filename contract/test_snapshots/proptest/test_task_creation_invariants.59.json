@@ -54,7 +54,7 @@
                         "symbol": "gas_balance"
                       },
                       "val": {
-                        "i128": "1534249"
+                        "i128": "319610"
                       }
                     },
                     {
@@ -62,7 +62,7 @@
                         "symbol": "interval"
                       },
                       "val": {
-                        "u64": "284627"
+                        "u32": 55268501
                       }
                     },
                     {
@@ -239,7 +239,7 @@
                       "symbol": "gas_balance"
                     },
                     "val": {
-                      "i128": "1534249"
+                      "i128": "319610"
                     }
                   },
                   {
@@ -247,7 +247,7 @@
                       "symbol": "interval"
                     },
                     "val": {
-                      "u64": "284627"
+                      "u32": 55268501
                     }
                   },
                   {
@@ -295,6 +295,33 @@
                     "val": "void"
                   }
                 ]
+              }
+            }
+          },
+          "ext": "v0"
+        },
+        "live_until": 4095
+      },
+      {
+        "entry": {
+          "last_modified_ledger_seq": 0,
+          "data": {
+            "contract_data": {
+              "ext": "v0",
+              "contract": "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAD2KM",
+              "key": {
+                "vec": [
+                  {
+                    "symbol": "TaskFingerprint"
+                  },
+                  {
+                    "bytes": "64d5c86454246d4b5d113c6b4c8e37d00ec665fd4ab6e30cc15b695af62452fd"
+                  }
+                ]
+              },
+              "durability": "persistent",
+              "val": {
+                "bool": true
               }
             }
           },

@@ -64,7 +64,7 @@
                         "symbol": "interval"
                       },
                       "val": {
-                        "u64": "3600"
+                        "u32": 3600
                       }
                     },
                     {
@@ -176,7 +176,7 @@
                         "symbol": "interval"
                       },
                       "val": {
-                        "u64": "3600"
+                        "u32": 3600
                       }
                     },
                     {
@@ -1598,7 +1598,7 @@
                       "symbol": "interval"
                     },
                     "val": {
-                      "u64": "3600"
+                      "u32": 3600
                     }
                   },
                   {
@@ -1722,7 +1722,7 @@
                       "symbol": "interval"
                     },
                     "val": {
-                      "u64": "3600"
+                      "u32": 3600
                     }
                   },
                   {
@@ -1772,6 +1772,60 @@
                     "val": "void"
                   }
                 ]
+              }
+            }
+          },
+          "ext": "v0"
+        },
+        "live_until": 4095
+      },
+      {
+        "entry": {
+          "last_modified_ledger_seq": 0,
+          "data": {
+            "contract_data": {
+              "ext": "v0",
+              "contract": "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAD2KM",
+              "key": {
+                "vec": [
+                  {
+                    "symbol": "TaskFingerprint"
+                  },
+                  {
+                    "bytes": "63043c24c4324161e953f0fd3d1307b65e28faccc2167b74e770f253560d39f0"
+                  }
+                ]
+              },
+              "durability": "persistent",
+              "val": {
+                "bool": true
+              }
+            }
+          },
+          "ext": "v0"
+        },
+        "live_until": 4095
+      },
+      {
+        "entry": {
+          "last_modified_ledger_seq": 0,
+          "data": {
+            "contract_data": {
+              "ext": "v0",
+              "contract": "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAD2KM",
+              "key": {
+                "vec": [
+                  {
+                    "symbol": "TaskFingerprint"
+                  },
+                  {
+                    "bytes": "767431a96214e9b4b8073ed8bda78e6894f417fb1f61387bfbc29c98a9596721"
+                  }
+                ]
+              },
+              "durability": "persistent",
+              "val": {
+                "bool": true
               }
             }
           },

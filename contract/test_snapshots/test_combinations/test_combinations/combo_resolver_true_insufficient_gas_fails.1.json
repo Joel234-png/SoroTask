@@ -85,7 +85,7 @@
                         "symbol": "interval"
                       },
                       "val": {
-                        "u64": "3600"
+                        "u32": 3600
                       }
                     },
                     {
@@ -314,7 +314,7 @@
                       "symbol": "interval"
                     },
                     "val": {
-                      "u64": "3600"
+                      "u32": 3600
                     }
                   },
                   {
@@ -364,6 +364,33 @@
                     "val": "void"
                   }
                 ]
+              }
+            }
+          },
+          "ext": "v0"
+        },
+        "live_until": 4095
+      },
+      {
+        "entry": {
+          "last_modified_ledger_seq": 0,
+          "data": {
+            "contract_data": {
+              "ext": "v0",
+              "contract": "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAD2KM",
+              "key": {
+                "vec": [
+                  {
+                    "symbol": "TaskFingerprint"
+                  },
+                  {
+                    "bytes": "d8122b69cec8e651c8360b52b4ec5f1c3eee1d360d18fe2127d9dcb07d939ce6"
+                  }
+                ]
+              },
+              "durability": "persistent",
+              "val": {
+                "bool": true
               }
             }
           },

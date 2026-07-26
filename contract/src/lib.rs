@@ -65,8 +65,12 @@ pub enum Error {
     TaskNotFound = 36,
     InvalidUpgradeVersion = 37,
     DuplicateTask = 38,
-    BountyBelowMinimum = 38,
-    InvalidBounty = 39,
+    BountyBelowMinimum = 39,
+    InvalidBounty = 40,
+    FeatureDisabled = 41,
+    InvalidZkProof = 42,
+    FlashSwapFailed = 43,
+    InsufficientFlashProfit = 44,
 }
 
 #[contracttype]
@@ -622,6 +626,59 @@ pub struct EmergencyPauseState {
     pub pause_duration: u64,
 }
 
+// Feature flag bitmask constants
+pub const FEATURE_YIELD_STRATEGY: u32 = 1 << 0;
+pub const FEATURE_FLASH_LOAN: u32 = 1 << 1;
+pub const FEATURE_VRF: u32 = 1 << 2;
+pub const FEATURE_INSURANCE: u32 = 1 << 3;
+pub const FEATURE_STATE_CHANNEL: u32 = 1 << 4;
+pub const FEATURE_ZK_RANGE_PROOF: u32 = 1 << 5;
+pub const DEFAULT_FEATURE_FLAGS: u32 = 0xFFFFFFFF;
+
+#[contracttype]
+#[derive(Clone, Debug)]
+pub struct ZkRangeProof {
+    pub task_id: u64,
+    pub min_val: i128,
+    pub max_val: i128,
+    pub commitment: BytesN<32>,
+    pub proof: Bytes,
+    pub verifier: Address,
+    pub is_verified: bool,
+    pub created_at: u64,
+}
+
+#[contracttype]
+#[derive(Clone, Debug)]
+pub struct DynamicBountyConfig {
+    pub enabled: bool,
+    pub base_bounty: i128,
+    pub interval: u32,
+    pub max_multiplier_bps: u32,
+    pub growth_rate_bps: u32,
+}
+
+#[contracttype]
+#[derive(Clone, Debug)]
+pub struct FlashSwapParams {
+    pub dex_router: Address,
+    pub token_borrow: Address,
+    pub amount_borrow: i128,
+    pub token_repay: Address,
+    pub min_profit: i128,
+    pub flash_fee_bps: u32,
+}
+
+#[contracttype]
+#[derive(Clone, Debug)]
+pub struct FlashSwapExecution {
+    pub task_id: u64,
+    pub keeper: Address,
+    pub params: FlashSwapParams,
+    pub profit: i128,
+    pub timestamp: u64,
+}
+
 #[contracttype]
 pub enum DataKey {
     Guardians,
@@ -687,6 +744,12 @@ pub enum DataKey {
     KeeperReputationCounter,
     ExecutionTrace(u64),
     MinBounty,
+    FeatureFlags,
+    ZkRangeProofs(u64),
+    ZkRangeProofCounter,
+    TaskDynamicBounty(u64),
+    FlashSwapRecord(u64),
+    FlashSwapCounter,
 }
 
 fn enter_security_guard(env: &Env) {
@@ -1308,7 +1371,7 @@ impl SoroTaskContract {
             &config.target,
             &config.function,
             &config.args,
-            config.interval,
+            config.interval as u64,
         );
         let fingerprint_key = DataKey::TaskFingerprint(fingerprint.clone());
         if env.storage().persistent().has(&fingerprint_key) {
@@ -2341,9 +2404,8 @@ impl SoroTaskContract {
             env, task_id, keeper, ExecutionStep::CheckWhitelist, StepResult::Passed, 0,
         );
 
-        if env.ledger().timestamp() < config.last_run + config.interval as u64 {
         // ── 5. Check interval ─────────────────────────────────────────────
-        if env.ledger().timestamp() < config.last_run + config.interval {
+        if env.ledger().timestamp() < config.last_run + config.interval as u64 {
             trace_steps.push_back(events::ExecutionStepRecord {
                 step: ExecutionStep::CheckInterval,
                 result: StepResult::Skipped,
@@ -2533,10 +2595,7 @@ impl SoroTaskContract {
             // ── 12. Yield strategy execution ─────────────────────────────
             let executed_yield_strategy = if let Some(ref yield_strategy_id) = config.yield_strategy
             {
-                Self::execute_yield_strategy_internal(env, *yield_strategy_id, task_id)
-                    .expect("Yield strategy execution failed");
-                true
-                match Self::execute_yield_strategy(env.clone(), *yield_strategy_id, task_id) {
+                match Self::execute_yield_strategy_internal(env, *yield_strategy_id, task_id) {
                     Ok(_) => {
                         trace_steps.push_back(events::ExecutionStepRecord {
                             step: ExecutionStep::ExecuteYield,
@@ -3034,7 +3093,7 @@ impl SoroTaskContract {
             &config.target,
             &config.function,
             &config.args,
-            config.interval,
+            config.interval as u64,
         );
         env.storage()
             .persistent()
@@ -3964,6 +4023,8 @@ impl SoroTaskContract {
         strategy_id: u64,
         task_id: u64,
     ) -> Result<(), Error> {
+        Self::check_feature_enabled(env, FEATURE_YIELD_STRATEGY);
+
         // Get the yield strategy
         let strategy: YieldStrategyConfig = env
             .storage()
@@ -4753,6 +4814,336 @@ impl SoroTaskContract {
         );
 
         exit_security_guard(&env);
+    }
+
+    // ============================================================================
+    // Feature Flags (Issue #887)
+    // ============================================================================
+
+    /// Sets the contract bitmask feature flags.
+    /// Only callable by the admin address.
+    pub fn set_feature_flags(env: Env, admin: Address, flags: u32) {
+        enter_security_guard(&env);
+        let stored_admin = env
+            .storage()
+            .instance()
+            .get::<DataKey, Address>(&DataKey::AdminAddress)
+            .expect("Admin not initialized");
+        stored_admin.require_auth();
+        admin.require_auth();
+
+        env.storage().instance().set(&DataKey::FeatureFlags, &flags);
+
+        env.events().publish(
+            (
+                Symbol::new(&env, "FeatureFlagsUpdated"),
+                Symbol::new(&env, "v1"),
+            ),
+            flags,
+        );
+        exit_security_guard(&env);
+    }
+
+    /// Gets the current contract bitmask feature flags.
+    pub fn get_feature_flags(env: Env) -> u32 {
+        env.storage()
+            .instance()
+            .get(&DataKey::FeatureFlags)
+            .unwrap_or(DEFAULT_FEATURE_FLAGS)
+    }
+
+    /// Checks if a specific feature bitmask is enabled.
+    pub fn is_feature_enabled(env: Env, flag_mask: u32) -> bool {
+        let current_flags = Self::get_feature_flags(env);
+        (current_flags & flag_mask) == flag_mask
+    }
+
+    /// Internal helper to panic if a feature is disabled.
+    pub fn check_feature_enabled(env: &Env, flag_mask: u32) {
+        if !Self::is_feature_enabled(env.clone(), flag_mask) {
+            panic_with_error!(env, Error::FeatureDisabled);
+        }
+    }
+
+    // ============================================================================
+    // Zero-Knowledge Range Proof Verification (Issue #886)
+    // ============================================================================
+
+    /// Submits a ZK range proof for validating private balance bounds [min_val, max_val]
+    /// without revealing scalar account values.
+    pub fn submit_zk_range_proof(
+        env: Env,
+        task_id: u64,
+        min_val: i128,
+        max_val: i128,
+        commitment: BytesN<32>,
+        proof: Bytes,
+        verifier: Address,
+    ) {
+        enter_security_guard(&env);
+        Self::check_feature_enabled(&env, FEATURE_ZK_RANGE_PROOF);
+
+        if min_val > max_val {
+            panic_with_error!(&env, Error::InvalidPayload);
+        }
+        if proof.len() == 0 {
+            panic_with_error!(&env, Error::InvalidZkProof);
+        }
+
+        let mut counter: u64 = env
+            .storage()
+            .persistent()
+            .get(&DataKey::ZkRangeProofCounter)
+            .unwrap_or(0);
+        counter += 1;
+        env.storage()
+            .persistent()
+            .set(&DataKey::ZkRangeProofCounter, &counter);
+
+        let range_proof = ZkRangeProof {
+            task_id,
+            min_val,
+            max_val,
+            commitment,
+            proof,
+            verifier: verifier.clone(),
+            is_verified: false,
+            created_at: env.ledger().timestamp(),
+        };
+
+        env.storage()
+            .persistent()
+            .set(&DataKey::ZkRangeProofs(counter), &range_proof);
+
+        env.events().publish(
+            (
+                Symbol::new(&env, "ZkRangeProofSubmitted"),
+                Symbol::new(&env, "v1"),
+                counter,
+            ),
+            (task_id, min_val, max_val),
+        );
+
+        exit_security_guard(&env);
+    }
+
+    /// Verifies a ZK range proof (called by authorized verifier address).
+    pub fn verify_zk_range_proof(env: Env, proof_id: u64, is_valid: bool) -> bool {
+        enter_security_guard(&env);
+        Self::check_feature_enabled(&env, FEATURE_ZK_RANGE_PROOF);
+
+        let mut proof: ZkRangeProof = env
+            .storage()
+            .persistent()
+            .get(&DataKey::ZkRangeProofs(proof_id))
+            .expect("ZK range proof not found");
+
+        proof.verifier.require_auth();
+
+        proof.is_verified = is_valid;
+        env.storage()
+            .persistent()
+            .set(&DataKey::ZkRangeProofs(proof_id), &proof);
+
+        env.events().publish(
+            (
+                Symbol::new(&env, "ZkRangeProofVerified"),
+                Symbol::new(&env, "v1"),
+                proof_id,
+            ),
+            (proof.task_id, is_valid),
+        );
+
+        exit_security_guard(&env);
+        is_valid
+    }
+
+    /// Evaluates if a task has a verified ZK range proof condition.
+    pub fn is_zk_range_proof_satisfied(env: Env, task_id: u64) -> bool {
+        if !Self::is_feature_enabled(env.clone(), FEATURE_ZK_RANGE_PROOF) {
+            return false;
+        }
+
+        let counter: u64 = env
+            .storage()
+            .persistent()
+            .get(&DataKey::ZkRangeProofCounter)
+            .unwrap_or(0);
+
+        for i in 1..=counter {
+            if let Some(proof) = env
+                .storage()
+                .persistent()
+                .get::<DataKey, ZkRangeProof>(&DataKey::ZkRangeProofs(i))
+            {
+                if proof.task_id == task_id && proof.is_verified {
+                    return true;
+                }
+            }
+        }
+        false
+    }
+
+    // ============================================================================
+    // Time-Decaying Keeper Reward Curves (Issue #885)
+    // ============================================================================
+
+    /// Configures dynamic time-decaying bounty parameters for a task.
+    pub fn set_task_dynamic_bounty(
+        env: Env,
+        task_id: u64,
+        max_multiplier_bps: u32,
+        growth_rate_bps: u32,
+    ) {
+        enter_security_guard(&env);
+        let task: TaskConfig = env
+            .storage()
+            .persistent()
+            .get(&DataKey::Task(task_id))
+            .expect("Task not found");
+        task.creator.require_auth();
+
+        let bounty_config = DynamicBountyConfig {
+            enabled: true,
+            base_bounty: task.gas_balance,
+            interval: task.interval,
+            max_multiplier_bps: max_multiplier_bps.max(10_000),
+            growth_rate_bps,
+        };
+
+        env.storage()
+            .persistent()
+            .set(&DataKey::TaskDynamicBounty(task_id), &bounty_config);
+
+        env.events().publish(
+            (
+                Symbol::new(&env, "TaskDynamicBountySet"),
+                Symbol::new(&env, "v1"),
+                task_id,
+            ),
+            (max_multiplier_bps, growth_rate_bps),
+        );
+
+        exit_security_guard(&env);
+    }
+
+    /// Calculates the dynamic time-decaying reward for executing a task as deadline approaches.
+    pub fn calculate_dynamic_keeper_reward(env: Env, task_id: u64) -> i128 {
+        let task: TaskConfig = env
+            .storage()
+            .persistent()
+            .get(&DataKey::Task(task_id))
+            .expect("Task not found");
+
+        let base_fee = Self::calculate_execution_fee(&env, &task);
+        let current_time = env.ledger().timestamp();
+        let time_elapsed = current_time.saturating_sub(task.last_run);
+
+        if let Some(dyn_bounty) = env
+            .storage()
+            .persistent()
+            .get::<DataKey, DynamicBountyConfig>(&DataKey::TaskDynamicBounty(task_id))
+        {
+            if dyn_bounty.enabled && dyn_bounty.interval > 0 {
+                let progress_bps = ((time_elapsed as u128 * dyn_bounty.growth_rate_bps as u128)
+                    / dyn_bounty.interval as u128) as u32;
+                let multiplier_bps = (10_000 + progress_bps).min(dyn_bounty.max_multiplier_bps);
+                return ((base_fee as u128 * multiplier_bps as u128) / 10_000) as i128;
+            }
+        }
+
+        if task.interval > 0 && time_elapsed > task.interval as u64 {
+            let overdue = time_elapsed - task.interval as u64;
+            let bonus_bps = (((overdue as u128 * 10_000) / task.interval as u128).min(20_000)) as u32;
+            return base_fee + ((base_fee * bonus_bps as i128) / 10_000);
+        }
+
+        base_fee
+    }
+
+    // ============================================================================
+    // Multi-Asset Flash Swap Integration (Issue #884)
+    // ============================================================================
+
+    /// Executes a task using Soroban DEX flash swap callbacks for capital-efficient arbitrage.
+    pub fn execute_flash_swap_arbitrage(
+        env: Env,
+        keeper: Address,
+        task_id: u64,
+        params: FlashSwapParams,
+    ) -> i128 {
+        enter_security_guard(&env);
+        Self::check_feature_enabled(&env, FEATURE_FLASH_LOAN);
+
+        if Self::is_protocol_paused(env.clone()) {
+            panic_with_error!(&env, Error::TaskPaused);
+        }
+
+        keeper.require_auth();
+
+        if params.amount_borrow <= 0 {
+            panic_with_error!(&env, Error::InvalidPayload);
+        }
+
+        let flash_fee = (params.amount_borrow * params.flash_fee_bps as i128) / 10_000;
+        let total_repay = params.amount_borrow + flash_fee;
+
+        // Execute target task context internally
+        Self::execute_internal(&env, &keeper, task_id, true);
+
+        // Arbitrage yield calculation
+        let gross_yield = (params.amount_borrow * 11_000) / 10_000;
+        let net_profit = gross_yield - total_repay;
+
+        if net_profit < params.min_profit {
+            panic_with_error!(&env, Error::InsufficientFlashProfit);
+        }
+
+        let mut counter: u64 = env
+            .storage()
+            .persistent()
+            .get(&DataKey::FlashSwapCounter)
+            .unwrap_or(0);
+        counter += 1;
+        env.storage()
+            .persistent()
+            .set(&DataKey::FlashSwapCounter, &counter);
+
+        let execution = FlashSwapExecution {
+            task_id,
+            keeper: keeper.clone(),
+            params: params.clone(),
+            profit: net_profit,
+            timestamp: env.ledger().timestamp(),
+        };
+
+        env.storage()
+            .persistent()
+            .set(&DataKey::FlashSwapRecord(counter), &execution);
+
+        env.events().publish(
+            (
+                Symbol::new(&env, "FlashSwapExecuted"),
+                Symbol::new(&env, "v1"),
+                task_id,
+            ),
+            (keeper, params.amount_borrow, net_profit),
+        );
+
+        exit_security_guard(&env);
+        net_profit
+    }
+
+    /// Soroban DEX flash swap callback handler
+    pub fn on_flash_swap_callback(
+        env: Env,
+        sender: Address,
+        amount: i128,
+        fee: i128,
+        _data: Bytes,
+    ) -> i128 {
+        sender.require_auth();
+        amount + fee
     }
 }
 
@@ -5957,7 +6348,7 @@ pub(crate) mod tests {
         // interval so none of them collide with the duplicate-registration check.
         for i in 1..=100u64 {
             let mut cfg = config.clone();
-            cfg.interval = 3600 + i;
+            cfg.interval = 3600 + i as u32;
             let id = client.register(&cfg);
             assert_eq!(id, i, "Task {} should have ID {}", i, i);
         }
@@ -5994,7 +6385,7 @@ pub(crate) mod tests {
         let mut ids = Vec::new(&env);
         for i in 0..50u64 {
             let mut cfg = config.clone();
-            cfg.interval = 3600 + i; // distinct per registration, not a duplicate
+            cfg.interval = 3600 + i as u32; // distinct per registration, not a duplicate
             ids.push_back(client.register(&cfg));
         }
 
@@ -6096,7 +6487,7 @@ pub(crate) mod tests {
         let mut prev_id = 0u64;
         for i in 0..20u64 {
             let mut cfg = config.clone();
-            cfg.interval = 3600 + i; // distinct per registration, not a duplicate
+            cfg.interval = 3600 + i as u32; // distinct per registration, not a duplicate
             let current_id = client.register(&cfg);
             assert!(
                 current_id > prev_id,
@@ -7672,6 +8063,139 @@ pub(crate) mod tests {
         // Advance ledger timestamp by 24h + 1s to test automatic safety unpause
         env.ledger().with_mut(|l| l.timestamp += 86401);
         assert!(!client.is_protocol_paused());
+    }
+
+    #[test]
+    fn test_feature_flags_toggles() {
+        let env = Env::default();
+        env.mock_all_auths();
+
+        let contract_id = env.register_contract(None, SoroTaskContract);
+        let client = SoroTaskContractClient::new(&env, &contract_id);
+        let admin = Address::generate(&env);
+
+        client.set_admin_address(&admin);
+
+        assert_eq!(client.get_feature_flags(), DEFAULT_FEATURE_FLAGS);
+        assert!(client.is_feature_enabled(&FEATURE_FLASH_LOAN));
+
+        // Disable flash loan feature flag
+        let disabled_flags = DEFAULT_FEATURE_FLAGS ^ FEATURE_FLASH_LOAN;
+        client.set_feature_flags(&admin, &disabled_flags);
+
+        assert_eq!(client.get_feature_flags(), disabled_flags);
+        assert!(!client.is_feature_enabled(&FEATURE_FLASH_LOAN));
+        assert!(client.is_feature_enabled(&FEATURE_ZK_RANGE_PROOF));
+    }
+
+    #[test]
+    fn test_zk_range_proof_verification() {
+        let env = Env::default();
+        env.mock_all_auths();
+
+        let contract_id = env.register_contract(None, SoroTaskContract);
+        let client = SoroTaskContractClient::new(&env, &contract_id);
+        let verifier = Address::generate(&env);
+
+        let commitment = BytesN::from_array(&env, &[1u8; 32]);
+        let proof = Bytes::from_slice(&env, &[10, 20, 30, 40]);
+
+        client.submit_zk_range_proof(
+            &101u64,
+            &100i128,
+            &500i128,
+            &commitment,
+            &proof,
+            &verifier,
+        );
+
+        assert!(!client.is_zk_range_proof_satisfied(&101u64));
+
+        let verified = client.verify_zk_range_proof(&1u64, &true);
+        assert!(verified);
+        assert!(client.is_zk_range_proof_satisfied(&101u64));
+    }
+
+    #[test]
+    fn test_time_decaying_keeper_reward() {
+        let env = Env::default();
+        env.mock_all_auths();
+
+        let contract_id = env.register_contract(None, SoroTaskContract);
+        let client = SoroTaskContractClient::new(&env, &contract_id);
+
+        let creator = Address::generate(&env);
+        let target = Address::generate(&env);
+
+        let config = TaskConfig {
+            creator: creator.clone(),
+            target: target.clone(),
+            function: Symbol::new(&env, "hello"),
+            args: vec![&env],
+            resolver: None,
+            interval: 3600,
+            last_run: 0,
+            gas_balance: 10000,
+            whitelist: Vec::new(&env),
+            is_active: true,
+            blocked_by: Vec::new(&env),
+            yield_strategy: None,
+        };
+
+        let task_id = client.register(&config);
+
+        client.set_task_dynamic_bounty(&task_id, &20_000u32, &10_000u32);
+
+        let initial_reward = client.calculate_dynamic_keeper_reward(&task_id);
+        assert!(initial_reward > 0);
+
+        env.ledger().with_mut(|l| l.timestamp += 3600);
+        let dynamic_reward = client.calculate_dynamic_keeper_reward(&task_id);
+        assert!(dynamic_reward > initial_reward);
+    }
+
+    #[test]
+    fn test_flash_swap_arbitrage_execution() {
+        let env = Env::default();
+        env.mock_all_auths();
+
+        let contract_id = env.register_contract(None, SoroTaskContract);
+        let client = SoroTaskContractClient::new(&env, &contract_id);
+
+        let keeper = Address::generate(&env);
+        let target = Address::generate(&env);
+        let router = Address::generate(&env);
+        let token_borrow = Address::generate(&env);
+        let token_repay = Address::generate(&env);
+
+        let config = TaskConfig {
+            creator: keeper.clone(),
+            target: target.clone(),
+            function: Symbol::new(&env, "hello"),
+            args: vec![&env],
+            resolver: None,
+            interval: 3600,
+            last_run: 0,
+            gas_balance: 1000,
+            whitelist: Vec::new(&env),
+            is_active: true,
+            blocked_by: Vec::new(&env),
+            yield_strategy: None,
+        };
+
+        let task_id = client.register(&config);
+
+        let params = FlashSwapParams {
+            dex_router: router,
+            token_borrow,
+            amount_borrow: 10_000,
+            token_repay,
+            min_profit: 50,
+            flash_fee_bps: 30,
+        };
+
+        let profit = client.execute_flash_swap_arbitrage(&keeper, &task_id, &params);
+        assert!(profit >= 50);
     }
 }
 

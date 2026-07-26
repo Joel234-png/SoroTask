@@ -62,7 +62,7 @@
                         "symbol": "interval"
                       },
                       "val": {
-                        "u64": "3600"
+                        "u32": 3601
                       }
                     },
                     {
@@ -174,7 +174,7 @@
                         "symbol": "interval"
                       },
                       "val": {
-                        "u64": "3600"
+                        "u32": 3600
                       }
                     },
                     {
@@ -286,7 +286,7 @@
                         "symbol": "interval"
                       },
                       "val": {
-                        "u64": "3600"
+                        "u32": 3602
                       }
                     },
                     {
@@ -417,7 +417,7 @@
                         "symbol": "interval"
                       },
                       "val": {
-                        "u64": "3600"
+                        "u32": 3600
                       }
                     },
                     {
@@ -607,7 +607,7 @@
                       "symbol": "interval"
                     },
                     "val": {
-                      "u64": "3600"
+                      "u32": 3601
                     }
                   },
                   {
@@ -727,7 +727,7 @@
                       "symbol": "interval"
                     },
                     "val": {
-                      "u64": "3600"
+                      "u32": 3602
                     }
                   },
                   {
@@ -847,7 +847,7 @@
                       "symbol": "interval"
                     },
                     "val": {
-                      "u64": "3600"
+                      "u32": 3600
                     }
                   },
                   {
@@ -895,6 +895,87 @@
                     "val": "void"
                   }
                 ]
+              }
+            }
+          },
+          "ext": "v0"
+        },
+        "live_until": 4095
+      },
+      {
+        "entry": {
+          "last_modified_ledger_seq": 0,
+          "data": {
+            "contract_data": {
+              "ext": "v0",
+              "contract": "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAD2KM",
+              "key": {
+                "vec": [
+                  {
+                    "symbol": "TaskFingerprint"
+                  },
+                  {
+                    "bytes": "93663490142c19b55e314649d31b60402b10cda4591beca4530c676bc33e0adf"
+                  }
+                ]
+              },
+              "durability": "persistent",
+              "val": {
+                "bool": true
+              }
+            }
+          },
+          "ext": "v0"
+        },
+        "live_until": 4095
+      },
+      {
+        "entry": {
+          "last_modified_ledger_seq": 0,
+          "data": {
+            "contract_data": {
+              "ext": "v0",
+              "contract": "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAD2KM",
+              "key": {
+                "vec": [
+                  {
+                    "symbol": "TaskFingerprint"
+                  },
+                  {
+                    "bytes": "ab60f0d2fb91f985e07f5d3dea8574472eeaacd86e881da95f0e1af6e56add45"
+                  }
+                ]
+              },
+              "durability": "persistent",
+              "val": {
+                "bool": true
+              }
+            }
+          },
+          "ext": "v0"
+        },
+        "live_until": 4095
+      },
+      {
+        "entry": {
+          "last_modified_ledger_seq": 0,
+          "data": {
+            "contract_data": {
+              "ext": "v0",
+              "contract": "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAD2KM",
+              "key": {
+                "vec": [
+                  {
+                    "symbol": "TaskFingerprint"
+                  },
+                  {
+                    "bytes": "de11375747a1415d21fa283f46e4bc18dec2e2bb728bc2e28aa189b30c685269"
+                  }
+                ]
+              },
+              "durability": "persistent",
+              "val": {
+                "bool": true
               }
             }
           },
