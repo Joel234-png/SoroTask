@@ -41,6 +41,16 @@ class WebhookTriggerHandler {
     this.metrics = options.metrics || null;
   }
 
+  _resolvePath(req) {
+    const { URL } = require('url');
+    try {
+      const url = new URL(req.url, 'http://127.0.0.1');
+      return url.pathname;
+    } catch {
+      return this.path;
+    }
+  }
+
   async handle(req, res) {
     if (req.method !== 'POST') {
       this.reject(res, 405, 'method_not_allowed');
@@ -57,9 +67,10 @@ class WebhookTriggerHandler {
       return;
     }
 
+    const resolvedPath = this._resolvePath(req);
     const verification = this.authProtocol.verify({
       method: req.method,
-      path: this.path,
+      path: resolvedPath,
       headers: req.headers,
       rawBody,
     });
@@ -143,7 +154,10 @@ class WebhookTriggerHandler {
       status,
       ...context,
     });
-    writeJson(res, status, { error: reason });
+    const body = { error: reason };
+    if (context.keyId) body.keyId = context.keyId;
+    if (context.eventId) body.eventId = context.eventId;
+    writeJson(res, status, body);
   }
 
   recordMetric(key, amount) {

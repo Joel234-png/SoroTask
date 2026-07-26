@@ -163,7 +163,7 @@ function loadConfig() {
     // Inbound Webhooks
     inboundWebhooks: {
       enabled: parseBoolean(process.env.INBOUND_WEBHOOKS_ENABLED, false),
-      path: process.env.INBOUND_WEBHOOK_PATH || '/webhooks/task-executions',
+      path: process.env.INBOUND_WEBHOOK_PATH || '/webhook/trigger',
       secret: process.env.INBOUND_WEBHOOK_SECRETS || null,
       defaultKeyId: process.env.INBOUND_WEBHOOK_DEFAULT_KEY_ID || 'primary',
       toleranceMs: parseInteger(process.env.INBOUND_WEBHOOK_TOLERANCE_MS, 300000),

@@ -703,7 +703,11 @@ class MetricsServer {
     this.p2pStateProvider = options.p2pStateProvider || null;
     this.failoverStateProvider = options.failoverStateProvider || null;
     this.webhookHandler = options.webhookHandler || null;
-    this.webhookPath = options.webhookPath || '/webhooks/task-executions';
+    this.webhookPath = options.webhookPath || '/webhook/trigger';
+    this.webhookPaths = new Set([
+      this.webhookPath,
+      '/webhooks/task-executions',
+    ]);
     this.p2pStateProvider = options.p2pStateProvider || null;
     this.streamHub = options.streamHub || null;
     this.apiGateway = options.apiGateway || new ApiGateway({
@@ -758,6 +762,13 @@ class MetricsServer {
   setWebhookHandler(handler, path = this.webhookPath) {
     this.webhookHandler = handler;
     this.webhookPath = path;
+    this.webhookPaths = new Set([path, '/webhooks/task-executions']);
+  }
+
+  registerWebhookPath(additionalPath) {
+    if (additionalPath) {
+      this.webhookPaths.add(additionalPath);
+    }
   }
 
   setP2PStateProvider(provider) {
@@ -1542,7 +1553,7 @@ class MetricsServer {
       } else if (req.url === '/admin/reconciliation' || req.url === '/admin/reconciliation/') {
         protect(() => this.handleReconciliationState(res))();
 
-      } else if (url.pathname === this.webhookPath && this.webhookHandler) {
+      } else if (this.webhookPaths.has(url.pathname) && this.webhookHandler) {
         // Webhook requests (unauthenticated - auth handled by webhook handler)
         this.webhookHandler.handle(req, res);
 
