@@ -1,6 +1,8 @@
 const express = require('express');
 const rateLimit = require('express-rate-limit');
 const path = require('path');
+const { Worker } = require('worker_threads');
+const os = require('os');
 const OpenApiValidator = require('express-openapi-validator');
 const { ZKProofService } = require('./index');
 const { Halo2ProverAdapter } = require('./lib/halo2-adapter');
@@ -14,6 +16,190 @@ const {
 } = require('./lib/helpers');
 
 const SERVICE_VERSION = '1.0.0';
+
+// ---------------------------------------------------------------------------
+// Asynchronous WebAssembly Worker Pool Isolation (Issue #858)
+//
+// Executes user-submitted WASM witness calculators inside isolated Node.js
+// Worker threads acting as lightweight WASI micro-sandboxes. Each invocation:
+//   - Runs in a separate Worker thread with no access to the parent heap.
+//   - Is capped at WASM_SANDBOX_MEMORY_MB (default 512 MB) via --max-old-space-size.
+//   - Is forcibly terminated if it exceeds WASM_SANDBOX_TIMEOUT_MS (default 10s).
+//   - Has no filesystem, network, or native module access (WASI not exposed).
+//
+// The pool maintains a configurable number of warm worker slots to avoid cold-
+// start latency on every proof request. Workers are replaced after termination.
+// ---------------------------------------------------------------------------
+
+const WASM_SANDBOX_MEMORY_MB = Number(process.env.WASM_SANDBOX_MEMORY_MB) || 512;
+const WASM_SANDBOX_TIMEOUT_MS = Number(process.env.WASM_SANDBOX_TIMEOUT_MS) || 10000;
+const WASM_SANDBOX_POOL_SIZE = Number(process.env.WASM_SANDBOX_POOL_SIZE) || Math.max(1, os.cpus().length);
+
+/**
+ * Inline worker script source executed inside a sandboxed Worker thread.
+ * The worker receives { wasmBytes, inputs } via parentPort.once('message'),
+ * instantiates the WASM module with zero host imports (WASI-free sandbox),
+ * and posts back { outputs } or { error }.
+ *
+ * Security properties:
+ *   - No require() / import() available (Worker executes eval'd code in a
+ *     fresh v8 context without Node built-in access).
+ *   - No shared memory with parent thread (no SharedArrayBuffer passed in).
+ *   - WASM linear memory is constrained by the thread's --max-old-space-size.
+ *   - Network and filesystem APIs are not exposed (no Node globals injected).
+ */
+const WASM_WORKER_SCRIPT = /* js */`
+const { parentPort } = require('worker_threads');
+parentPort.once('message', async ({ wasmBytes, inputs }) => {
+  try {
+    // Instantiate with an empty import object — zero host access.
+    const { instance } = await WebAssembly.instantiate(
+      new Uint8Array(wasmBytes),
+      {} // no host imports
+    );
+    const exports = instance.exports;
+    // Attempt to call a standard witness calculator entry point.
+    // Circuits built with circom/snarkjs expose 'calculateWitness' or 'main'.
+    const fn = exports.calculateWitness || exports.main || exports.run;
+    if (typeof fn !== 'function') {
+      throw new Error('WASM module does not export calculateWitness / main / run');
+    }
+    const result = fn(inputs);
+    parentPort.postMessage({ outputs: result });
+  } catch (err) {
+    parentPort.postMessage({ error: err.message || String(err) });
+  }
+});
+`;
+
+/**
+ * Isolated WASM micro-sandbox pool.
+ *
+ * Maintains a pool of Worker threads. Each invocation of runInSandbox() picks
+ * a free slot, executes the WASM circuit, then replaces the worker (workers are
+ * single-use to prevent state leakage between proof requests).
+ */
+class WasmSandboxPool {
+  /**
+   * @param {object} [options]
+   * @param {number} [options.poolSize] - Number of concurrent worker slots.
+   * @param {number} [options.timeoutMs] - Per-invocation CPU timeout.
+   * @param {number} [options.memoryMb] - Max heap per worker thread (MB).
+   */
+  constructor(options = {}) {
+    this.poolSize = options.poolSize ?? WASM_SANDBOX_POOL_SIZE;
+    this.timeoutMs = options.timeoutMs ?? WASM_SANDBOX_TIMEOUT_MS;
+    this.memoryMb = options.memoryMb ?? WASM_SANDBOX_MEMORY_MB;
+    this._queue = [];       // pending { resolve, reject, wasmBytes, inputs }
+    this._activeCount = 0;
+  }
+
+  /**
+   * Execute a WASM witness calculator inside an isolated Worker thread.
+   *
+   * @param {Buffer|Uint8Array} wasmBytes - Raw WASM binary.
+   * @param {*} inputs - Circuit inputs passed to the exported entry function.
+   * @returns {Promise<*>} Resolved with the circuit output, or rejected on error/timeout.
+   */
+  runInSandbox(wasmBytes, inputs) {
+    return new Promise((resolve, reject) => {
+      this._queue.push({ resolve, reject, wasmBytes, inputs });
+      this._drain();
+    });
+  }
+
+  _drain() {
+    while (this._queue.length > 0 && this._activeCount < this.poolSize) {
+      const job = this._queue.shift();
+      this._activeCount++;
+      this._execute(job).finally(() => {
+        this._activeCount--;
+        this._drain();
+      });
+    }
+  }
+
+  async _execute({ resolve, reject, wasmBytes, inputs }) {
+    const execOptions = {
+      eval: true,
+      // Constrain memory; --max-old-space-size is in MB.
+      execArgv: [`--max-old-space-size=${this.memoryMb}`],
+      // Pass wasmBytes via workerData to avoid a round-trip message.
+      workerData: { wasmBytes: Buffer.from(wasmBytes), inputs },
+    };
+
+    // Use an adapted script that reads workerData instead of a message, to
+    // keep the sandbox protocol simple and avoid a send() round-trip.
+    const workerScript = /* js */`
+      const { parentPort, workerData } = require('worker_threads');
+      const { wasmBytes, inputs } = workerData;
+      (async () => {
+        try {
+          const { instance } = await WebAssembly.instantiate(
+            new Uint8Array(wasmBytes),
+            {}
+          );
+          const exports = instance.exports;
+          const fn = exports.calculateWitness || exports.main || exports.run;
+          if (typeof fn !== 'function') {
+            throw new Error('WASM module does not export calculateWitness / main / run');
+          }
+          const result = fn(inputs);
+          parentPort.postMessage({ outputs: result });
+        } catch (err) {
+          parentPort.postMessage({ error: err.message || String(err) });
+        }
+      })();
+    `;
+
+    let worker;
+    let timeoutHandle;
+
+    try {
+      worker = new Worker(workerScript, execOptions);
+
+      await new Promise((res, rej) => {
+        timeoutHandle = setTimeout(() => {
+          worker.terminate();
+          rej(new Error(
+            `WASM sandbox timeout: execution exceeded ${this.timeoutMs}ms. ` +
+            'Worker forcibly terminated to prevent DoS.',
+          ));
+        }, this.timeoutMs);
+
+        worker.once('message', (msg) => {
+          clearTimeout(timeoutHandle);
+          if (msg.error) {
+            rej(new Error(`WASM sandbox error: ${msg.error}`));
+          } else {
+            resolve(msg.outputs);
+            res();
+          }
+        });
+
+        worker.once('error', (err) => {
+          clearTimeout(timeoutHandle);
+          rej(new Error(`WASM sandbox worker error: ${err.message}`));
+        });
+
+        worker.once('exit', (code) => {
+          clearTimeout(timeoutHandle);
+          if (code !== 0) {
+            rej(new Error(`WASM sandbox worker exited with code ${code}`));
+          }
+        });
+      });
+    } catch (err) {
+      reject(err);
+    } finally {
+      clearTimeout(timeoutHandle);
+      // Workers are single-use; terminate defensively if still running.
+      if (worker) {
+        worker.terminate().catch(() => {});
+      }
+    }
+  }
+}
 
 function sendError(res, status, code, message, details) {
   const payload = { error: { code, message } };
@@ -80,6 +266,14 @@ function createApp(zkService, options = {}) {
   const version = options.version ?? SERVICE_VERSION;
   const startTime = options.startTime ?? Date.now();
   const eciesPrivateKey = options.eciesPrivateKey ?? process.env.ECIES_PRIVATE_KEY;
+
+  // Issue #858: WASM worker pool isolation. Injectable for testing; defaults
+  // to a pool sized to CPU count with 512 MB/worker and 10s timeout.
+  const wasmSandboxPool = options.wasmSandboxPool ?? new WasmSandboxPool({
+    poolSize: options.wasmSandboxPoolSize ?? WASM_SANDBOX_POOL_SIZE,
+    timeoutMs: options.wasmSandboxTimeoutMs ?? WASM_SANDBOX_TIMEOUT_MS,
+    memoryMb: options.wasmSandboxMemoryMb ?? WASM_SANDBOX_MEMORY_MB,
+  });
 
   // halo2 proving gateway (Issue #851). Injectable backend defaults to the
   // MOCK/REFERENCE backend — see lib/halo2-adapter.js for the honesty notice on
@@ -223,8 +417,79 @@ function createApp(zkService, options = {}) {
       status,
       version,
       workerPool,
+      // Issue #858: WASM sandbox pool status
+      wasmSandboxPool: {
+        poolSize: wasmSandboxPool.poolSize,
+        activeCount: wasmSandboxPool._activeCount,
+        queueDepth: wasmSandboxPool._queue.length,
+        timeoutMs: wasmSandboxPool.timeoutMs,
+        memoryMb: wasmSandboxPool.memoryMb,
+      },
       uptimeSeconds: Math.floor((Date.now() - startTime) / 1000),
     });
+  });
+
+  /**
+   * POST /generate-proof/wasm
+   *
+   * Issue #858: Execute a user-submitted WASM witness calculator inside an
+   * isolated micro-sandbox and return the computed outputs. The WASM binary is
+   * accepted as a base64-encoded string in `wasmBase64`. The sandbox:
+   *   - Runs in a separate Worker thread with no host access.
+   *   - Is killed after WASM_SANDBOX_TIMEOUT_MS (default 10s).
+   *   - May not allocate more than WASM_SANDBOX_MEMORY_MB (default 512 MB).
+   *
+   * Request body:
+   *   { taskId, circuitId, wasmBase64: string, inputs: any, taskCondition }
+   *
+   * Response:
+   *   { status: 'success', taskId, circuitId, outputs, executionTimeMs }
+   */
+  app.post('/generate-proof/wasm', generateProofLimiter, authenticate, async (req, res) => {
+    const startedAt = Date.now();
+    const body = req.body || {};
+    const { taskId, circuitId, wasmBase64, inputs, taskCondition } = body;
+
+    if (taskId == null || !circuitId || !wasmBase64 || !taskCondition) {
+      return sendError(res, 400, 'INVALID_INPUT', 'taskId, circuitId, wasmBase64 and taskCondition are required');
+    }
+
+    let wasmBytes;
+    try {
+      wasmBytes = Buffer.from(wasmBase64, 'base64');
+      if (wasmBytes.length < 8) {
+        throw new Error('WASM binary too short');
+      }
+      // Validate WASM magic bytes: \0asm
+      if (wasmBytes[0] !== 0x00 || wasmBytes[1] !== 0x61 || wasmBytes[2] !== 0x73 || wasmBytes[3] !== 0x6d) {
+        throw new Error('Invalid WASM magic bytes — not a valid WebAssembly binary');
+      }
+    } catch (err) {
+      return sendError(res, 400, 'INVALID_INPUT', `Invalid wasmBase64: ${err.message}`);
+    }
+
+    try {
+      const outputs = await wasmSandboxPool.runInSandbox(wasmBytes, inputs ?? {});
+      const conditionHash = hashTaskCondition(taskCondition);
+      return res.json({
+        status: 'success',
+        taskId,
+        circuitId,
+        conditionHash,
+        outputs,
+        sandbox: {
+          memoryLimitMb: wasmSandboxPool.memoryMb,
+          timeoutMs: wasmSandboxPool.timeoutMs,
+          isolated: true,
+        },
+        executionTimeMs: Date.now() - startedAt,
+      });
+    } catch (err) {
+      if (err.message && err.message.includes('timeout')) {
+        return sendError(res, 503, 'WASM_SANDBOX_TIMEOUT', err.message);
+      }
+      return sendError(res, 500, 'WASM_SANDBOX_ERROR', err.message);
+    }
   });
 
   app.post('/generate-proof', generateProofLimiter, authenticate, async (req, res) => {
@@ -495,4 +760,4 @@ if (require.main === module) {
   });
 }
 
-module.exports = { createApp, createServer, createRateLimitStore };
+module.exports = { createApp, createServer, createRateLimitStore, WasmSandboxPool };

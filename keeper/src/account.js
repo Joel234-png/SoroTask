@@ -211,6 +211,186 @@ function loadAccount(config) {
   return Keypair.fromSecret(config.keeperSecret);
 }
 
+// ---------------------------------------------------------------------------
+// XLM Reserve Auto-Balance via Stellar SEP-24 Anchor (Issue #846)
+//
+// Monitors the keeper's native XLM balance and triggers an automated deposit
+// via a SEP-24 compliant Stellar Anchor when the reserve drops below the
+// configured threshold. This prevents keeper nodes from going permanently
+// offline due to insufficient XLM while the operator is unavailable.
+//
+// Configuration environment variables:
+//   XLM_RESERVE_MIN_BALANCE   - Minimum XLM balance threshold (default: 5)
+//   XLM_RESERVE_TARGET_BALANCE - Target XLM balance after top-up (default: 20)
+//   ANCHOR_HOME_DOMAIN         - Stellar Anchor home domain (e.g. 'anchor.example.com')
+//   ANCHOR_ASSET_CODE          - Fiat asset code at the anchor (default: 'USDC')
+//   ANCHOR_ASSET_ISSUER        - Issuer account of the anchor asset
+//   ANCHOR_ACCOUNT_ID          - Anchor-side account/customer identifier
+//   ANCHOR_JWT_TOKEN           - Pre-obtained JWT for SEP-24 interactive deposit
+// ---------------------------------------------------------------------------
+
+const XLM_RESERVE_MIN_BALANCE = parseFloat(process.env.XLM_RESERVE_MIN_BALANCE || '5');
+const XLM_RESERVE_TARGET_BALANCE = parseFloat(process.env.XLM_RESERVE_TARGET_BALANCE || '20');
+
+/**
+ * Fetch the current native XLM balance for a Stellar account.
+ *
+ * @param {string} publicKey
+ * @param {import('@stellar/stellar-sdk').rpc.Server} server
+ * @returns {Promise<number>} XLM balance as a float
+ */
+async function getNativeXlmBalance(publicKey, server) {
+  const accountResponse = await server.getAccount(publicKey);
+  const balances = accountResponse.balances || [];
+  const nativeBalance = balances.find((b) => b.asset_type === 'native');
+  return nativeBalance ? parseFloat(nativeBalance.balance) : 0;
+}
+
+/**
+ * Resolve the SEP-24 transfer server URL from a Stellar anchor's stellar.toml.
+ *
+ * @param {string} homeDomain - e.g. 'anchor.example.com'
+ * @returns {Promise<string>} Transfer server base URL
+ */
+async function resolveAnchorTransferServer(homeDomain) {
+  const fetchFn = globalThis.fetch || require('node-fetch');
+  const tomlUrl = `https://${homeDomain}/.well-known/stellar.toml`;
+  const res = await fetchFn(tomlUrl);
+  if (!res.ok) {
+    throw new Error(`Failed to fetch stellar.toml from ${homeDomain}: HTTP ${res.status}`);
+  }
+  const text = await res.text();
+  const match = text.match(/TRANSFER_SERVER_SEP0024\s*=\s*["']?([^"'\s]+)["']?/);
+  if (!match) {
+    throw new Error(`TRANSFER_SERVER_SEP0024 not found in ${homeDomain}/.well-known/stellar.toml`);
+  }
+  return match[1].replace(/\/$/, '');
+}
+
+/**
+ * Initiate a SEP-24 interactive deposit to top up the keeper's XLM balance.
+ *
+ * The function initiates the SEP-24 /transactions/deposit/interactive endpoint.
+ * The returned URL should be opened by an operator or automated browser session
+ * to complete the fiat → XLM deposit flow through the anchor's UI.
+ *
+ * @param {object} options
+ * @param {string} options.transferServer - SEP-24 transfer server base URL
+ * @param {string} options.jwtToken - JWT obtained via SEP-10 auth
+ * @param {string} options.assetCode - Asset code (e.g. 'USDC', 'USD')
+ * @param {string} options.assetIssuer - Asset issuer public key
+ * @param {string} options.account - Destination Stellar account (keeper public key)
+ * @param {number} options.amount - Amount of fiat asset to deposit (approximate)
+ * @returns {Promise<{ id: string, url: string, type: string }>}
+ */
+async function initiateAnchorDeposit({ transferServer, jwtToken, assetCode, assetIssuer, account, amount }) {
+  const fetchFn = globalThis.fetch || require('node-fetch');
+  const endpoint = `${transferServer}/transactions/deposit/interactive`;
+
+  const body = new URLSearchParams({
+    asset_code: assetCode,
+    asset_issuer: assetIssuer,
+    account,
+    amount: String(amount),
+  });
+
+  const res = await fetchFn(endpoint, {
+    method: 'POST',
+    headers: {
+      Authorization: `Bearer ${jwtToken}`,
+      'Content-Type': 'application/x-www-form-urlencoded',
+    },
+    body: body.toString(),
+  });
+
+  if (!res.ok) {
+    const text = await res.text().catch(() => '(no body)');
+    throw new Error(`SEP-24 deposit initiation failed: HTTP ${res.status} — ${text}`);
+  }
+
+  const json = await res.json();
+  if (!json.id || !json.url) {
+    throw new Error(`SEP-24 deposit response missing id or url: ${JSON.stringify(json)}`);
+  }
+
+  return { id: json.id, url: json.url, type: json.type || 'interactive' };
+}
+
+/**
+ * Check the keeper's XLM balance and trigger an automated anchor deposit if it
+ * falls below XLM_RESERVE_MIN_BALANCE.
+ *
+ * This is the main entry point for the automated reserve management loop. Call
+ * it periodically (e.g. on each polling cycle) to keep the keeper funded.
+ *
+ * @param {object} options
+ * @param {string} options.publicKey - Keeper's Stellar public key
+ * @param {import('@stellar/stellar-sdk').rpc.Server} options.server - Soroban RPC server
+ * @param {object} [options.overrides] - Optional overrides for env-sourced config (testing)
+ * @returns {Promise<{ checked: true, balance: number, sufficient: boolean, deposit?: object }>}
+ */
+async function checkAndTopUpXlmReserve(options) {
+  const { publicKey, server } = options;
+  const overrides = options.overrides || {};
+
+  const minBalance = overrides.minBalance ?? XLM_RESERVE_MIN_BALANCE;
+  const targetBalance = overrides.targetBalance ?? XLM_RESERVE_TARGET_BALANCE;
+  const homeDomain = overrides.anchorHomeDomain ?? process.env.ANCHOR_HOME_DOMAIN;
+  const assetCode = overrides.assetCode ?? process.env.ANCHOR_ASSET_CODE ?? 'USDC';
+  const assetIssuer = overrides.assetIssuer ?? process.env.ANCHOR_ASSET_ISSUER ?? '';
+  const jwtToken = overrides.jwtToken ?? process.env.ANCHOR_JWT_TOKEN;
+
+  const balance = await getNativeXlmBalance(publicKey, server);
+
+  if (balance >= minBalance) {
+    logger.debug('XLM reserve sufficient', { balance, minBalance });
+    return { checked: true, balance, sufficient: true };
+  }
+
+  logger.warn('XLM reserve below minimum — initiating anchor top-up', {
+    balance,
+    minBalance,
+    targetBalance,
+  });
+
+  if (!homeDomain) {
+    logger.error('ANCHOR_HOME_DOMAIN not configured — cannot auto-top-up XLM reserve');
+    return { checked: true, balance, sufficient: false, error: 'anchor_not_configured' };
+  }
+
+  if (!jwtToken) {
+    logger.error('ANCHOR_JWT_TOKEN not configured — cannot authenticate with anchor');
+    return { checked: true, balance, sufficient: false, error: 'anchor_jwt_missing' };
+  }
+
+  try {
+    const transferServer = overrides.transferServer
+      || await resolveAnchorTransferServer(homeDomain);
+
+    const depositAmount = targetBalance - balance;
+    const deposit = await initiateAnchorDeposit({
+      transferServer,
+      jwtToken,
+      assetCode,
+      assetIssuer,
+      account: publicKey,
+      amount: Math.ceil(depositAmount),
+    });
+
+    logger.info('SEP-24 anchor deposit initiated', {
+      depositId: deposit.id,
+      depositUrl: deposit.url,
+      assetCode,
+      estimatedAmount: depositAmount,
+    });
+
+    return { checked: true, balance, sufficient: false, deposit };
+  } catch (err) {
+    logger.error('Failed to initiate anchor top-up', { error: err.message });
+    return { checked: true, balance, sufficient: false, error: err.message };
+  }
+}
+
 module.exports = {
   initializeKeeperAccount,
   buildTransitionKeyring,
@@ -220,4 +400,9 @@ module.exports = {
   fetchSecretFromVault,
   fetchSecretFromAWS,
   clearSecretMemory,
+  // Issue #846 — XLM reserve auto-balance
+  getNativeXlmBalance,
+  resolveAnchorTransferServer,
+  initiateAnchorDeposit,
+  checkAndTopUpXlmReserve,
 };
