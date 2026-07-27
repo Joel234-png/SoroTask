@@ -362,5 +362,52 @@ describe('Keeper Integration Tests', () => {
 
       expect(taskCompleted).toBe(true);
     });
+
+    test('should integrate GracefulShutdownManager with ExecutionQueue and clean up locks', async () => {
+      const { GracefulShutdownManager } = require('../src/gracefulShutdown');
+      const shutdownManager = new GracefulShutdownManager({
+        drainTimeoutMs: 500,
+        exitOnComplete: false,
+      });
+
+      queue = new ExecutionQueue(1);
+
+      // Wire queue events to shutdownManager exactly as index.js does
+      queue.on('task:started', (taskId) => shutdownManager.trackTask(taskId));
+      queue.on('task:success', (taskId) => shutdownManager.completeTask(taskId));
+      queue.on('task:failed', (taskId, err) => shutdownManager.failTask(taskId, err));
+      queue.on('task:lock-acquired', (taskId, token) => shutdownManager.trackRedisLock(taskId, token));
+      queue.on('task:lock-released', (taskId) => shutdownManager.untrackRedisLock(taskId));
+
+      shutdownManager.registerResource('execution-queue', async () => {
+        await queue.drain();
+      });
+
+      let lockAcquiredEventFired = false;
+      let lockReleasedEventFired = false;
+      queue.on('task:lock-acquired', () => { lockAcquiredEventFired = true; });
+      queue.on('task:lock-released', () => { lockReleasedEventFired = true; });
+
+      queue.distributedLockEnabled = true;
+
+      // Mock acquireLock / releaseLock in queue
+      const lockModule = require('../src/lock');
+      const acquireSpy = jest.spyOn(lockModule, 'acquireLock').mockResolvedValue('test-lock-token');
+      const releaseSpy = jest.spyOn(lockModule, 'releaseLock').mockResolvedValue(true);
+
+      let executed = false;
+      await queue.enqueue([999], async () => {
+        executed = true;
+        expect(shutdownManager.activeLocks.has('999')).toBe(true);
+      });
+
+      expect(executed).toBe(true);
+      expect(lockAcquiredEventFired).toBe(true);
+      expect(lockReleasedEventFired).toBe(true);
+      expect(shutdownManager.activeLocks.has('999')).toBe(false);
+
+      acquireSpy.mockRestore();
+      releaseSpy.mockRestore();
+    });
   });
 });
