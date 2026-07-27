@@ -7,10 +7,8 @@ const {
 } = require("./reconciliation");
 const { runStaleTaskCleanup } = require("./staleTasks");
 const { startApiServer } = require("./api");
-const { recordEventIndexed, updateLedgerMetrics } = require("./metrics");
-const { HighAvailabilityManager, ROLES } = require("./ha");
-const { CacheInvalidationEngine } = require("./cacheInvalidator");
-const { ParallelLedgerParser } = require("./parallelParser");
+const { broadcastEvent } = require("./wsServer");
+const { computeAndStoreLedgerMerkle } = require("./merkleStore");
 
 // Configuration
 const RPC_URL = "https://soroban-testnet.stellar.org"; // Change as needed
@@ -72,8 +70,37 @@ const db = new sqlite3.Database(DB_FILE, (err) => {
   }
 });
 
+// Promise-style adapters over the callback `db` so shared modules (merkleStore)
+// can run against the indexer's live database connection.
+const dbDeps = {
+  queryAll: (sql, params = []) =>
+    new Promise((resolve, reject) =>
+      db.all(sql, params, (err, rows) => (err ? reject(err) : resolve(rows)))),
+  queryGet: (sql, params = []) =>
+    new Promise((resolve, reject) =>
+      db.get(sql, params, (err, row) => (err ? reject(err) : resolve(row)))),
+  queryRun: (sql, params = []) =>
+    new Promise((resolve, reject) =>
+      db.run(sql, params, function (err) { return err ? reject(err) : resolve(this); })),
+};
+
 // Helper to store cursor (last processed paging token)
 let cursor = "0"; // Start from 0; will be updated to latest ledger on first poll
+
+// Cache invalidation engine (no Redis by default; swap in a real client via env)
+const cacheInvalidator = new CacheInvalidationEngine();
+
+// Ledger gap detector — invalidates cache whenever sequence continuity breaks
+const gapDetector = new LedgerGapDetector({
+  cacheInvalidator,
+  maxAllowedGap: 1,
+  onGap: (info) => {
+    console.warn(
+      `[GapDetector] Ledger gap of ${info.gapSize} detected (${info.from} → ${info.to}). ` +
+      `Cache flushed to prevent stale reads.`
+    );
+  },
+});
 
 // Event handler mapping
 async function handleEvent(event) {
@@ -143,6 +170,14 @@ async function handleEvent(event) {
       } else {
         recordEventIndexed(name);
         console.log(`Stored event: ${name} for task ${taskId} at ledger ${event.ledgerSequence}`);
+        // Issue #861: push newly-ingested events to subscribed WebSocket clients.
+        broadcastEvent({
+          ledger_sequence: event.ledgerSequence,
+          contract_id: CONTRACT_ID,
+          event_name: name,
+          task_id: taskId,
+          data: JSON.parse(dataJson),
+        });
       }
     }
   );
@@ -151,9 +186,7 @@ async function handleEvent(event) {
   // After storing event, reconcile this task to ensure state is correct
   if (taskId) {
     await reconcileTask(taskId);
-    if (typeof cacheInvalidator !== 'undefined' && cacheInvalidator) {
-      cacheInvalidator.invalidateForEvent(name, taskId, JSON.parse(dataJson || '{}'));
-    }
+    cacheInvalidator.invalidateForEvent(name, taskId, JSON.parse(dataJson || '{}'));
   }
 }
 
@@ -382,10 +415,22 @@ async function poll() {
       limit: 200,
     });
 
+    const touchedLedgers = new Set();
     for (const event of response.events) {
       await handleEvent(event);
+      touchedLedgers.add(event.ledgerSequence);
       cursor = event.ledger.toString(); // Update cursor to the last event's ledger
       updateLedgerMetrics(Number(cursor), Number(networkHead));
+    }
+
+    // Issue #863: (re)compute and persist a Merkle root over each ledger's
+    // event set once that ledger's events have been ingested.
+    for (const ledger of touchedLedgers) {
+      try {
+        await computeAndStoreLedgerMerkle(dbDeps, ledger);
+      } catch (merkleErr) {
+        console.error(`Error computing Merkle root for ledger ${ledger}:`, merkleErr.message);
+      }
     }
 
     // In production, persist cursor to storage (e.g., file, database) here
@@ -458,13 +503,33 @@ Options:
 if (!handleCLI()) {
   // Start polling
   console.log("Starting event indexer...");
-  startApiServer(4000).catch(console.error);
+  const { createWsServer } = require("./wsServer");
+  startApiServer(4000)
+    .then((httpServer) => {
+      // Issue #861: attach the real-time WebSocket streaming server to the
+      // same HTTP server, served at ws://<host>:4000/ws.
+      createWsServer({ server: httpServer, path: "/ws" });
+      console.log("🔌 WebSocket event stream ready at ws://localhost:4000/ws");
+    })
+    .catch(console.error);
   setInterval(poll, POLL_INTERVAL_MS);
   poll(); // Initial call
 
   // Start periodic reconciliation
   console.log("Starting periodic reconciliation (every 5 minutes)...");
   setInterval(reconcileAll, RECONCILE_INTERVAL_MS);
+
+  // Start synthetic transaction monitoring for end-to-end ingestion health
+  const syntheticMonitor = new SyntheticMonitor({
+    db,
+    rpc,
+    contractId: CONTRACT_ID,
+    intervalMs: Number(process.env.SYNTHETIC_INTERVAL_MS || 60_000),
+    latencyThresholdMs: Number(process.env.SYNTHETIC_LATENCY_THRESHOLD_MS || 30_000),
+    timeoutMs: Number(process.env.SYNTHETIC_TIMEOUT_MS || 120_000),
+    webhookUrl: process.env.SYNTHETIC_MONITOR_WEBHOOK_URL || null,
+  });
+  syntheticMonitor.start();
 
   console.log("Starting stale task cleanup dry-run (every 24 hours)...");
   setInterval(() => {

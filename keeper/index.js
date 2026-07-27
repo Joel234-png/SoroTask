@@ -31,6 +31,9 @@ const { WebhookTriggerHandler } = require("./src/webhookTrigger");
 const { MultiRegionRPCClient } = require("./src/disasterRecovery");
 const { KeeperP2PNetwork } = require("./src/p2pNetwork");
 const { KeeperAlertManager } = require("./src/keeperAlerts");
+const { TaskMetadataCache } = require("./src/taskMetadataCache");
+const { FraudDetectionService } = require("./src/fraudDetection");
+const { SLAMonitor } = require("./src/slaMonitor");
 
 // Create root logger for the main module
 const logger = createLogger("keeper");
@@ -134,6 +137,14 @@ async function main() {
   metricsServer.setApiGateway(config.apiGatewayEnabled ? apiGateway : null);
   metricsServer.setFailurePredictor(failurePredictor);
   metricsServer.setReputationScorer(reputationScorer);
+
+  const fraudDetector = new FraudDetectionService({
+    logger: createLogger("fraud-detector"),
+    metricsServer,
+    historyManager,
+  });
+  metricsServer.fraudDetector = fraudDetector;
+
   metricsServer.updateShardState({
     shardIndex: shardConfig.shardIndex,
     shardCount: shardConfig.shardCount,
@@ -165,6 +176,18 @@ async function main() {
 
   const alertManager = new KeeperAlertManager();
   alertManager.startRpcMonitor(() => server.getLatestLedger());
+
+  const slaMonitor = new SLAMonitor(server, config.contractId, config, {
+    historyManager,
+    metricsServer,
+    logger: createLogger("sla-monitor"),
+    operatorKeypair: keypair,
+  });
+
+  if (slaMonitor.enabled) {
+    await slaMonitor.start();
+    logger.info("SLA monitor started");
+  }
 
   // Perform startup validation to fail fast on configuration errors
   const validator = new StartupValidator(
@@ -213,6 +236,20 @@ async function main() {
 
   const shutdownManager = new GracefulShutdownManager(logger);
 
+  // Initialize task metadata LRU cache (event wiring deferred until registry is ready)
+  let taskMetadataCache = null;
+  if (config.taskCacheEnabled) {
+    taskMetadataCache = new TaskMetadataCache({
+      ttlSeconds: config.taskCacheTtlSeconds,
+      maxSize: config.taskCacheMaxSize,
+      logger: createLogger("task-cache"),
+    });
+    logger.info("Task metadata cache created", {
+      ttlSeconds: config.taskCacheTtlSeconds,
+      maxSize: config.taskCacheMaxSize,
+    });
+  }
+
   // Initialize polling engine with logger and filter chain
   const poller = new TaskPoller(server, config.contractId, {
     maxConcurrentReads: process.env.MAX_CONCURRENT_READS,
@@ -228,6 +265,7 @@ async function main() {
     driftWarningSeconds: config.driftWarningSeconds,
     driftCriticalSeconds: config.driftCriticalSeconds,
     config,
+    taskMetadataCache,
   });
   logger.info("Poller initialized", { contractId: config.contractId });
 
@@ -243,7 +281,7 @@ async function main() {
       pollCorrelationId: context?.pollCorrelationId || null,
     });
   });
-  queue.on("task:success", (taskId) => {
+  queue.on("task:success", (taskId, context) => {
     queueLogger.info("Task executed successfully", { taskId });
     const executionResult = context?.executionResult || null;
     const finalResult = executionResult?.result || executionResult || {};
@@ -317,6 +355,9 @@ async function main() {
     alertManager.recordFailure({ taskId, error: err.message });
     shutdownManager.failTask(taskId, err);
     poller.invalidateCache(taskId);
+    if (taskMetadataCache) {
+      taskMetadataCache.invalidate(taskId);
+    }
     metricsServer.publishTaskEvent("queue-failed", taskId, { error: err.message });
   });
   queue.on("task:skipped", (taskId, context) =>
@@ -494,6 +535,16 @@ async function main() {
     logger: createLogger("registry"),
   });
   await registry.init();
+
+  // Wire event-driven cache invalidation now that the registry is initialized.
+  // Registry events (TaskPaused, GasDeposited, KeeperPaid, etc.) instantly
+  // invalidate the affected cache entry so stale data is never served.
+  if (taskMetadataCache) {
+    registry.on("task:updated", ({ taskId }) => {
+      taskMetadataCache.invalidate(taskId);
+    });
+    logger.info("Task metadata cache wired to registry events");
+  }
 
   let reconciliationEngine = new ReconciliationEngine({
     logger: createLogger("reconciliation"),
