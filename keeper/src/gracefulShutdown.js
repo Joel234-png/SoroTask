@@ -56,6 +56,7 @@ class GracefulShutdownManager extends EventEmitter {
     // Resources to clean
     this.resources = [];
     this.signalHandlers = new Map();
+    this.activeLocks = new Map();
 
     this.logger.info("GracefulShutdownManager initialized", {
       drainTimeoutMs: this.drainTimeoutMs,
@@ -100,6 +101,39 @@ class GracefulShutdownManager extends EventEmitter {
   }
 
   /**
+   * Whether shutdown is currently in progress
+   */
+  get isShuttingDown() {
+    return this.state !== "initializing" && this.state !== "running";
+  }
+
+  /**
+   * Track a held Redis lock for clean release during shutdown
+   */
+  trackLock(taskId, token, options = {}) {
+    this.activeLocks.set(String(taskId), {
+      taskId: String(taskId),
+      token,
+      releaseFn: options.releaseFn || null,
+      nodes: options.nodes || [],
+    });
+    this.logger.debug("Tracked lock for shutdown management", { taskId, token });
+  }
+
+  trackRedisLock(taskId, token, options = {}) {
+    return this.trackLock(taskId, token, options);
+  }
+
+  untrackLock(taskId) {
+    this.activeLocks.delete(String(taskId));
+    this.logger.debug("Untracked lock", { taskId });
+  }
+
+  untrackRedisLock(taskId) {
+    return this.untrackLock(taskId);
+  }
+
+  /**
    * Track in-flight task
    */
   trackTask(taskId) {
@@ -129,6 +163,7 @@ class GracefulShutdownManager extends EventEmitter {
         durationMs: duration,
       });
     }
+    this.untrackLock(taskId);
   }
 
   /**
@@ -147,6 +182,7 @@ class GracefulShutdownManager extends EventEmitter {
         error: task.error,
       });
     }
+    this.untrackLock(taskId);
   }
 
   /**
@@ -217,6 +253,10 @@ class GracefulShutdownManager extends EventEmitter {
       // Phase 4: Cleanup resources
       this.logger.info("Phase 4: Cleaning up resources");
       await this._cleanupResources();
+
+      // Phase 4.5: Release held locks cleanly
+      this.logger.info("Phase 4.5: Releasing held locks");
+      await this._releaseHeldLocks();
 
       // Phase 5: Final summary
       this._summarizeShutdown();
@@ -372,6 +412,45 @@ class GracefulShutdownManager extends EventEmitter {
   }
 
   /**
+   * Release held Redis locks cleanly before exit
+   */
+  async _releaseHeldLocks() {
+    if (this.activeLocks.size === 0) {
+      this.logger.debug("No held Redis locks to release");
+      return;
+    }
+
+    this.logger.info("Releasing held Redis locks cleanly before exit", {
+      count: this.activeLocks.size,
+    });
+
+    const { releaseLock, releaseRedlock } = require("./lock");
+
+    for (const lockInfo of this.activeLocks.values()) {
+      try {
+        let released = false;
+        if (typeof lockInfo.releaseFn === "function") {
+          released = await lockInfo.releaseFn(lockInfo.taskId, lockInfo.token);
+        } else if (lockInfo.nodes && lockInfo.nodes.length > 0) {
+          released = await releaseRedlock(lockInfo.taskId, lockInfo.token, lockInfo.nodes);
+        } else {
+          released = await releaseLock(lockInfo.taskId, lockInfo.token);
+        }
+        this.logger.info("Released held Redis lock cleanly during shutdown", {
+          taskId: lockInfo.taskId,
+          released,
+        });
+      } catch (error) {
+        this.logger.error("Error releasing Redis lock during shutdown", {
+          taskId: lockInfo.taskId,
+          error: error.message,
+        });
+      }
+    }
+    this.activeLocks.clear();
+  }
+
+  /**
    * Summarize shutdown for logs
    */
   _summarizeShutdown() {
@@ -392,6 +471,9 @@ class GracefulShutdownManager extends EventEmitter {
         registered: this.resources.length,
         cleaned: this.resources.filter((r) => r.cleaned).length,
         errored: this.resources.filter((r) => r.error).length,
+      },
+      locks: {
+        active: this.activeLocks.size,
       },
     };
 
@@ -460,6 +542,10 @@ class GracefulShutdownManager extends EventEmitter {
         total: this.resources.length,
         cleaned: this.resources.filter((r) => r.cleaned).length,
         withErrors: this.resources.filter((r) => r.error).length,
+      },
+      locks: {
+        active: this.activeLocks.size,
+        taskIds: Array.from(this.activeLocks.keys()),
       },
     };
   }

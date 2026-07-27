@@ -374,6 +374,15 @@ async function main() {
       pollCorrelationId: context?.pollCorrelationId || null,
     });
   });
+  queue.on("task:skipped", (taskId) => {
+    shutdownManager.completeTask(taskId);
+  });
+  queue.on("task:lock-acquired", (taskId, token) => {
+    shutdownManager.trackRedisLock(taskId, token);
+  });
+  queue.on("task:lock-released", (taskId) => {
+    shutdownManager.untrackRedisLock(taskId);
+  });
   queue.on("cycle:complete", (stats) =>
     queueLogger.info("Cycle complete", stats),
   );
@@ -665,6 +674,20 @@ async function main() {
     });
   });
 
+  // Register execution queue drain
+  shutdownManager.registerResource("execution-queue", async () => {
+    logger.info("Draining execution queue");
+    await queue.drain({
+      drainTimeoutMs: shutdownManager.drainTimeoutMs,
+    });
+  });
+
+  // Register metrics server stop
+  shutdownManager.registerResource("metrics-server", async () => {
+    logger.info("Stopping metrics server");
+    metricsServer.stop();
+  });
+
   // Initialize and start listening for signals
   shutdownManager.init();
 
@@ -675,8 +698,9 @@ async function main() {
 
   shutdownManager.on("shutdown:stop-accepting", () => {
     logger.info("Stopped accepting new work");
-    // Stop the polling loop explicitly
+    // Stop the polling loops explicitly
     clearInterval(pollingInterval);
+    clearInterval(reconcileInterval);
   });
 
   shutdownManager.on("shutdown:force", () => {
@@ -715,7 +739,7 @@ async function main() {
     }
 
     try {
-      if (isShuttingDown) {
+      if (shutdownManager.isShuttingDown) {
         logger.warn('Skipping polling cycle because shutdown is in progress');
         return;
       }
@@ -794,49 +818,11 @@ async function main() {
       }
     }, pollingIntervalMs);
 
-  let isShuttingDown = false;
-  const shutdownTimeoutMs = parseInt(process.env.SHUTDOWN_TIMEOUT_MS || '30000', 10);
-
-  const shutdown = async (signal) => {
-    if (isShuttingDown) {
-      logger.warn('Shutdown already in progress, ignoring repeated signal', { signal });
-      return;
-    }
-
-    isShuttingDown = true;
-    logger.info('Received shutdown signal, starting graceful shutdown', {
-      signal,
-      shutdownTimeoutMs,
-    });
-    clearInterval(pollingInterval);
-    clearInterval(reconcileInterval);
-    await queue.drain();
-    metricsServer.stop();
-    logger.info("Graceful shutdown complete, exiting");
-    process.exit(0);
-  };
-
-  process.on('SIGTERM', () => {
-    if (isShuttingDown) {
-      logger.fatal('Second shutdown signal received, forcing exit', { signal: 'SIGTERM' });
-      process.exit(1);
-    }
-    shutdown('SIGTERM');
-  });
-
-  process.on('SIGINT', () => {
-    if (isShuttingDown) {
-      logger.fatal('Second shutdown signal received, forcing exit', { signal: 'SIGINT' });
-      process.exit(1);
-    }
-    shutdown('SIGINT');
-  });
-
   // Run first poll immediately
   logger.info('Running initial poll');
   setTimeout(async () => {
     try {
-      if (isShuttingDown) {
+      if (shutdownManager.isShuttingDown) {
         logger.warn('Skipping initial poll because shutdown is in progress');
         return;
       }

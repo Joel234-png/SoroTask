@@ -558,6 +558,7 @@ class ExecutionQueue extends EventEmitter {
                 this.emit('task:skipped', taskId, { reason: 'distributed_lock' });
                 return;
               }
+              this.emit('task:lock-acquired', taskId, distributedLockToken);
             }
 
             const result = await executorFn(taskId, attemptContext);
@@ -644,6 +645,7 @@ class ExecutionQueue extends EventEmitter {
             if (distributedLockToken) {
               try {
                 await releaseLock(taskId, distributedLockToken);
+                this.emit('task:lock-released', taskId, distributedLockToken);
               } catch (err) {
                 this.logger.error('Error releasing lock', { taskId, error: err.message });
               }
@@ -775,6 +777,7 @@ class ExecutionQueue extends EventEmitter {
               this.emit('task:skipped', taskId, { reason: 'distributed_lock' });
               return;
             }
+            this.emit('task:lock-acquired', taskId, distributedLockToken);
           }
 
           const result = await executorFn(taskId, attemptContext);
@@ -834,6 +837,7 @@ class ExecutionQueue extends EventEmitter {
           if (distributedLockToken) {
             try {
               await releaseLock(taskId, distributedLockToken);
+              this.emit('task:lock-released', taskId, distributedLockToken);
             } catch (err) {
               this.logger.error('Error releasing lock', { taskId, error: err.message });
             }
