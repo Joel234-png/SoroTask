@@ -1,6 +1,7 @@
 const express = require('express');
 const { ApolloServer } = require('apollo-server-express');
 const cors = require('cors');
+const swaggerUi = require('swagger-ui-express');
 const { typeDefs } = require('./graphql/schema');
 const { resolvers } = require('./graphql/resolvers');
 const { createContext } = require('./graphql/auth');
@@ -34,7 +35,7 @@ function registerRestRoutes(app, deps = dbHelpers) {
   return app;
 }
 
-async function startApiServer(port = 4000) {
+function createExpressApp() {
   const app = express();
   app.use(cors());
   app.use(express.json());
@@ -46,7 +47,6 @@ async function startApiServer(port = 4000) {
     typeDefs,
     resolvers,
     context: createContext,
-    // Enable introspection in MVP to test the API easily
     introspection: true,
   });
 
@@ -55,7 +55,9 @@ async function startApiServer(port = 4000) {
 
   return new Promise((resolve) => {
     const httpServer = app.listen(port, () => {
-      console.log(`🚀 GraphQL API ready at http://localhost:${port}${server.graphqlPath}`);
+      console.log(`GraphQL API ready at http://localhost:${port}${server.graphqlPath}`);
+      console.log(`Prometheus Metrics ready at http://localhost:${port}/metrics`);
+      console.log(`OpenAPI v3 Docs ready at http://localhost:${port}/api-docs`);
       resolve(httpServer);
     });
   });

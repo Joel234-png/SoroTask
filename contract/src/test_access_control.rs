@@ -80,6 +80,7 @@ fn base_config(env: &Env, target: Address) -> TaskConfig {
         is_active: true,
         blocked_by: Vec::new(env),
         yield_strategy: None,
+        permissions: 15,
     }
 }
 
@@ -626,6 +627,7 @@ fn test_modify_task_cannot_transfer_ownership() {
         is_active: true,
         blocked_by: Vec::new(&env),
         yield_strategy: None,
+        permissions: 15,
     };
 
     client.modify_task(&task_id, &new_cfg);

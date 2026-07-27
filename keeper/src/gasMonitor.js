@@ -94,9 +94,74 @@ class GasMonitor {
       alertWebhookEnabled: !!this.ALERT_WEBHOOK_URL,
       alertDebounceMs: this.ALERT_DEBOUNCE_MS,
       forecastingEnabled: true,
+      mempoolSimulationEnabled: true,
       forecastSafetyBuffer: this.forecaster.SAFETY_BUFFER_MULTIPLIER,
       forecastAggregationWindow: this.forecaster.AGGREGATION_WINDOW_SECONDS,
       dynamicFeeMultiplier: this.getDynamicFeeMultiplier(),
+    };
+  }
+
+  /**
+   * Simulate mempool fee competition and calculate dynamic priority fee bids.
+   *
+   * @param {object} params
+   * @param {number} params.minBaseFee - Base fee from RPC
+   * @param {number} params.maxFee - Maximum fee cap per transaction
+   * @param {number} params.urgencyLevel - Task urgency level (1-5)
+   * @param {number} params.congestionFactor - Network congestion factor
+   * @returns {number} Recommended priority fee bid
+   */
+  calculatePriorityFeeBid({
+    minBaseFee = 100,
+    maxFee = 10000,
+    urgencyLevel = 1,
+    congestionFactor = 1.0,
+  } = {}) {
+    const trendMultiplier = this.getDynamicFeeMultiplier();
+    const effectiveCongestion = Math.max(1.0, congestionFactor);
+    const urgencyMultiplier = 1.0 + (Math.min(5, Math.max(1, urgencyLevel)) - 1) * 0.25;
+
+    const baseCalculatedFee = Math.ceil(
+      minBaseFee * effectiveCongestion * trendMultiplier * urgencyMultiplier,
+    );
+
+    const priorityFeeBid = Math.min(maxFee, Math.max(minBaseFee, baseCalculatedFee));
+
+    this.logger.info(`Calculated mempool priority fee bid: ${priorityFeeBid}`, {
+      minBaseFee,
+      maxFee,
+      urgencyLevel,
+      congestionFactor,
+      priorityFeeBid,
+    });
+
+    return priorityFeeBid;
+  }
+
+  /**
+   * Fetch and process Stellar ledger fee statistics to calculate congestion factor.
+   *
+   * @param {object} feeStats - RPC fee stats object containing min_base_fee and p90_base_fee
+   * @returns {object} Calculated fee analysis with congestion factor and recommended priority fee
+   */
+  simulateMempoolFees(feeStats = {}) {
+    const minBaseFee = parseInt(feeStats.min_base_fee || 100, 10);
+    const modeBaseFee = parseInt(feeStats.mode_base_fee || minBaseFee, 10);
+    const p90BaseFee = parseInt(feeStats.p90_base_fee || modeBaseFee, 10);
+
+    const congestionFactor = p90BaseFee > 0 ? p90BaseFee / minBaseFee : 1.0;
+    const priorityFee = this.calculatePriorityFeeBid({
+      minBaseFee,
+      maxFee: parseInt(process.env.MAX_GAS_FEE || 100000, 10),
+      congestionFactor,
+    });
+
+    return {
+      minBaseFee,
+      modeBaseFee,
+      p90BaseFee,
+      congestionFactor,
+      recommendedPriorityFee: priorityFee,
     };
   }
 
