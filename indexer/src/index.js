@@ -7,12 +7,7 @@ const {
 } = require("./reconciliation");
 const { runStaleTaskCleanup } = require("./staleTasks");
 const { startApiServer } = require("./api");
-const { recordEventIndexed, updateLedgerMetrics } = require("./metrics");
-const { HighAvailabilityManager, ROLES } = require("./ha");
-const { CacheInvalidationEngine } = require("./cacheInvalidator");
-const { ParallelLedgerParser } = require("./parallelParser");
-const { LedgerGapDetector } = require("./ledgerGapDetector");
-const { SyntheticMonitor } = require("./syntheticMonitor");
+const { computeAndStoreLedgerMerkle } = require("./merkleStore");
 
 // Configuration
 const RPC_URL = "https://soroban-testnet.stellar.org"; // Change as needed
@@ -73,6 +68,20 @@ const db = new sqlite3.Database(DB_FILE, (err) => {
     `);
   }
 });
+
+// Promise-style adapters over the callback `db` so shared modules (merkleStore)
+// can run against the indexer's live database connection.
+const dbDeps = {
+  queryAll: (sql, params = []) =>
+    new Promise((resolve, reject) =>
+      db.all(sql, params, (err, rows) => (err ? reject(err) : resolve(rows)))),
+  queryGet: (sql, params = []) =>
+    new Promise((resolve, reject) =>
+      db.get(sql, params, (err, row) => (err ? reject(err) : resolve(row)))),
+  queryRun: (sql, params = []) =>
+    new Promise((resolve, reject) =>
+      db.run(sql, params, function (err) { return err ? reject(err) : resolve(this); })),
+};
 
 // Helper to store cursor (last processed paging token)
 let cursor = "0"; // Start from 0; will be updated to latest ledger on first poll
@@ -397,13 +406,22 @@ async function poll() {
       limit: 200,
     });
 
+    const touchedLedgers = new Set();
     for (const event of response.events) {
       await handleEvent(event);
-      const ledgerSeq = Number(event.ledgerSequence ?? event.ledger);
-      // Detect and handle ledger sequence gaps before advancing the cursor
-      gapDetector.record(ledgerSeq);
+      touchedLedgers.add(event.ledgerSequence);
       cursor = event.ledger.toString(); // Update cursor to the last event's ledger
       updateLedgerMetrics(Number(cursor), Number(networkHead));
+    }
+
+    // Issue #863: (re)compute and persist a Merkle root over each ledger's
+    // event set once that ledger's events have been ingested.
+    for (const ledger of touchedLedgers) {
+      try {
+        await computeAndStoreLedgerMerkle(dbDeps, ledger);
+      } catch (merkleErr) {
+        console.error(`Error computing Merkle root for ledger ${ledger}:`, merkleErr.message);
+      }
     }
 
     // In production, persist cursor to storage (e.g., file, database) here
