@@ -28,9 +28,18 @@ interface StellarWalletContextType extends WalletState {
   disconnectWallet: () => Promise<void>;
   switchNetwork: (network: WalletNetwork) => void;
   kit: StellarWalletsKit | null;
+  /** True while a silent background reconnection attempt is in progress. */
+  reconnecting: boolean;
+  /** True when a persisted session was found but could not be silently restored. */
+  sessionExpired: boolean;
+  /** Dismiss the session-expired inline banner. */
+  dismissSessionExpired: () => void;
 }
 
+// Use sessionStorage so the persisted session is scoped to the browser tab
+// and is automatically cleared when the tab is closed (per issue #881).
 const STORAGE_KEY = 'stellar_wallet_session';
+const storage = typeof window !== 'undefined' ? window.sessionStorage : null;
 
 const StellarWalletContext = createContext<StellarWalletContextType | undefined>(
   undefined,
@@ -47,6 +56,8 @@ export const StellarWalletProvider: React.FC<{ children: ReactNode }> = ({
     isConnected: false,
   });
   const [kit, setKit] = useState<StellarWalletsKit | null>(null);
+  const [reconnecting, setReconnecting] = useState(false);
+  const [sessionExpired, setSessionExpired] = useState(false);
 
   // Initialize StellarWalletsKit instance
   useEffect(() => {
@@ -59,28 +70,64 @@ export const StellarWalletProvider: React.FC<{ children: ReactNode }> = ({
     setKit(walletKit);
   }, [network]);
 
-  // Restore persisted session on mount
+  // Silent re-connection on app initialisation (issue #881).
+  // Reads the persisted wallet type from sessionStorage and attempts a
+  // background re-connection via the wallet's background API without showing
+  // the modal. If the session is expired or the wallet rejects the silent
+  // request, we surface an unobtrusive inline banner instead.
   useEffect(() => {
     if (!kit) return;
 
-    const savedSession = localStorage.getItem(STORAGE_KEY);
-    if (savedSession) {
-      try {
-        const { address, walletId, savedNetwork } = JSON.parse(savedSession);
-        if (address && walletId) {
-          kit.setWallet(walletId);
-          setWalletState({
-            address,
-            walletId,
-            network: savedNetwork || WalletNetwork.TESTNET,
-            isConnected: true,
-          });
-        }
-      } catch (err) {
-        console.error('Failed to restore wallet session:', err);
-        localStorage.removeItem(STORAGE_KEY);
-      }
+    const savedSession = storage?.getItem(STORAGE_KEY);
+    if (!savedSession) return;
+
+    let parsed: { address: string; walletId: string; savedNetwork?: WalletNetwork } | null =
+      null;
+    try {
+      parsed = JSON.parse(savedSession);
+    } catch {
+      storage?.removeItem(STORAGE_KEY);
+      return;
     }
+
+    if (!parsed?.address || !parsed?.walletId) {
+      storage?.removeItem(STORAGE_KEY);
+      return;
+    }
+
+    const { address, walletId, savedNetwork } = parsed;
+
+    setReconnecting(true);
+    kit.setWallet(walletId);
+
+    // Attempt to silently verify the address is still accessible.
+    kit
+      .getAddress()
+      .then(({ address: freshAddress }) => {
+        // Use the freshly resolved address; fall back to the cached one if
+        // the wallet returns an empty string (some wallets behave this way
+        // when the extension is locked but not expired).
+        const resolvedAddress = freshAddress || address;
+        setWalletState({
+          address: resolvedAddress,
+          walletId,
+          network: savedNetwork || WalletNetwork.TESTNET,
+          isConnected: true,
+        });
+        storage?.setItem(
+          STORAGE_KEY,
+          JSON.stringify({ address: resolvedAddress, walletId, savedNetwork }),
+        );
+      })
+      .catch(() => {
+        // Silent reconnection failed — the session is expired or the wallet
+        // extension is unavailable. Show an inline banner instead of a modal.
+        storage?.removeItem(STORAGE_KEY);
+        setSessionExpired(true);
+      })
+      .finally(() => {
+        setReconnecting(false);
+      });
   }, [kit]);
 
   const connectWallet = useCallback(async () => {
@@ -100,7 +147,7 @@ export const StellarWalletProvider: React.FC<{ children: ReactNode }> = ({
           };
 
           setWalletState(newState);
-          localStorage.setItem(STORAGE_KEY, JSON.stringify(newState));
+          storage?.setItem(STORAGE_KEY, JSON.stringify(newState));
         },
       });
     } catch (error) {
@@ -118,7 +165,7 @@ export const StellarWalletProvider: React.FC<{ children: ReactNode }> = ({
       network,
       isConnected: false,
     });
-    localStorage.removeItem(STORAGE_KEY);
+    storage?.removeItem(STORAGE_KEY);
   }, [kit, network]);
 
   const switchNetwork = useCallback(
@@ -127,13 +174,15 @@ export const StellarWalletProvider: React.FC<{ children: ReactNode }> = ({
       setWalletState((prev) => {
         const updated = { ...prev, network: newNetwork };
         if (prev.isConnected) {
-          localStorage.setItem(STORAGE_KEY, JSON.stringify(updated));
+          storage?.setItem(STORAGE_KEY, JSON.stringify(updated));
         }
         return updated;
       });
     },
     [],
   );
+
+  const dismissSessionExpired = useCallback(() => setSessionExpired(false), []);
 
   return (
     <StellarWalletContext.Provider
@@ -143,6 +192,9 @@ export const StellarWalletProvider: React.FC<{ children: ReactNode }> = ({
         disconnectWallet,
         switchNetwork,
         kit,
+        reconnecting,
+        sessionExpired,
+        dismissSessionExpired,
       }}
     >
       {children}
