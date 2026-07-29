@@ -3,7 +3,6 @@ const fs = require('fs');
 const path = require('path');
 const { hashTaskCondition, isValidZkProof, zeroizeBuffer } = require('./lib/helpers');
 const EventEmitter = require('events');
-const { hashTaskCondition, isValidZkProof } = require('./lib/helpers');
 
 // ---------------------------------------------------------------------------
 // zkey Checksum Auditor
