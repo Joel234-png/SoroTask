@@ -88,6 +88,123 @@ async function fetchSecretFromAWS(secretId, region = process.env.AWS_REGION || '
 }
 
 /**
+ * Check whether the keeper is configured for HSM-only signing (no plaintext
+ * private key in process memory).  In this mode the keeper's Stellar account
+ * has its signer set to the public key of the remote KMS/HSM key, and all
+ * transaction signing happens via the HSM provider API.
+ *
+ * @returns {boolean}
+ */
+function isHsmOnlyMode() {
+  const provider = (process.env.KEY_PROVIDER || '').toLowerCase();
+  return (
+    provider === 'aws-kms' ||
+    provider === 'vault-transit' ||
+    (process.env.KMS_KEY_ID && provider === 'kms' || provider === 'aws-kms') ||
+    (process.env.VAULT_TRANSIT_KEY_NAME && provider === 'vault-transit')
+  );
+}
+
+/**
+ * Create a MultiSigHSMSigner from environment variables for use as the
+ * keeper's primary (or only) signing mechanism.  This is used in HSM-only
+ * mode when no plaintext KEEPER_SECRET is available.
+ *
+ * Environment variables (HSM-only mode):
+ *   KEY_PROVIDER             - 'aws-kms' | 'vault-transit'
+ *   KMS_KEY_ID               - AWS KMS key ID or ARN (when provider = aws-kms)
+ *   VAULT_TRANSIT_KEY_NAME   - Vault Transit key name (when provider = vault-transit)
+ *   AWS_KMS_REGION           - AWS region for KMS (default: us-east-1)
+ *   VAULT_TRANSIT_PATH       - Vault Transit mount path (default: v1/transit)
+ *
+ * @param {object} [opts] - Optional overrides (injected in tests)
+ * @returns {Promise<{ hsmSigner: MultiSigHSMSigner, keypair: Keypair }>}
+ */
+async function createHsmSigner(opts = {}) {
+  const providerType = (opts.providerType || process.env.KEY_PROVIDER || process.env.HSM_PROVIDER || 'aws-kms').toLowerCase();
+  let keyId;
+
+  if (providerType === 'aws-kms') {
+    keyId = opts.keyId || process.env.KMS_KEY_ID;
+  } else if (providerType === 'vault-transit') {
+    keyId = opts.keyId || process.env.VAULT_TRANSIT_KEY_NAME;
+  }
+
+  if (!keyId) {
+    throw new Error(
+      `HSM key ID not configured. Set ${providerType === 'aws-kms' ? 'KMS_KEY_ID' : 'VAULT_TRANSIT_KEY_NAME'} env var.`,
+    );
+  }
+
+  if (providerType === 'mock') {
+    const { MockHSMProvider } = require('./hsm/mockProvider');
+    const hsmProvider = new MockHSMProvider({ logger: opts.logger });
+    await hsmProvider.generateKey({ keyId });
+    const signer = new MultiSigHSMSigner({
+      hsmProvider,
+      keyIds: [keyId],
+      networkPassphrase: opts.networkPassphrase,
+      logger: opts.logger,
+    });
+    const pub = await hsmProvider.getPublicKey(keyId);
+    const keypair = _publicPemToKeypair(pub.publicPem);
+    return { hsmSigner: signer, keypair };
+  }
+
+  if (providerType === 'aws-kms') {
+    const { AwsKmsProvider } = require('./hsm/awsKmsProvider');
+    const hsmProvider = opts.hsmProvider || new AwsKmsProvider({
+      region: opts.awsRegion || process.env.AWS_KMS_REGION,
+      logger: opts.logger,
+    });
+    const signer = new MultiSigHSMSigner({
+      hsmProvider,
+      keyIds: [keyId],
+      networkPassphrase: opts.networkPassphrase,
+      logger: opts.logger,
+    });
+    const pub = await hsmProvider.getPublicKey(keyId);
+    const keypair = _publicPemToKeypair(pub.publicPem);
+    return { hsmSigner: signer, keypair };
+  }
+
+  if (providerType === 'vault-transit') {
+    const { VaultTransitProvider } = require('./hsm/vaultTransitProvider');
+    const hsmProvider = opts.hsmProvider || new VaultTransitProvider({
+      vaultAddr: opts.vaultAddr || process.env.VAULT_ADDR,
+      vaultToken: opts.vaultToken || process.env.VAULT_TOKEN,
+      transitPath: opts.transitPath || process.env.VAULT_TRANSIT_PATH,
+      logger: opts.logger,
+    });
+    const signer = new MultiSigHSMSigner({
+      hsmProvider,
+      keyIds: [keyId],
+      networkPassphrase: opts.networkPassphrase,
+      logger: opts.logger,
+    });
+    const pub = await hsmProvider.getPublicKey(keyId);
+    const keypair = _publicPemToKeypair(pub.publicPem);
+    return { hsmSigner: signer, keypair };
+  }
+
+  throw new Error(`Unsupported HSM provider for keyless mode: ${providerType}`);
+}
+
+/**
+ * Convert an Ed25519 public key PEM string into a Stellar SDK Keypair
+ * (public-key only — no private key material in memory).
+ * @param {string} publicPem
+ * @returns {Keypair}
+ */
+function _publicPemToKeypair(publicPem) {
+  const crypto = require('crypto');
+  const keyObj = crypto.createPublicKey(publicPem);
+  const der = keyObj.export({ type: 'spki', format: 'der' });
+  const rawKey = der.slice(-32);
+  return Keypair.fromPublicKey(rawKey.toString('hex'));
+}
+
+/**
  * Loads secret key from configured secret provider (Vault, AWS, or env)
  */
 async function loadSecretKey() {
@@ -125,7 +242,34 @@ async function loadSecretKey() {
  *
  * @returns {Promise<{ keypair: Keypair, accountResponse: any }>}
  */
-async function initializeKeeperAccount() {
+async function initializeKeeperAccount(opts = {}) {
+  // HSM-only mode: no plaintext private key in memory.
+  // The keeper signs all transactions via remote KMS/Vault Transit API.
+  if (isHsmOnlyMode() || opts.hsmOnly) {
+    logger.info('Initializing keeper in HSM-only mode (no plaintext private key)');
+    const { hsmSigner, keypair } = await createHsmSigner(opts);
+    const publicKey = keypair.publicKey();
+    logger.info('Keeper initialized from HSM', { publicKey, provider: process.env.KEY_PROVIDER || process.env.HSM_PROVIDER });
+
+    const rpcUrl = process.env.SOROBAN_RPC_URL || 'https://soroban-testnet.stellar.org';
+    const server = new Server(rpcUrl);
+
+    let accountResponse;
+    try {
+      accountResponse = await server.getAccount(publicKey);
+    } catch (err) {
+      if (err.response && err.response.status === 404) {
+        throw new Error(
+          `Keeper account ${publicKey} not found on-chain. ` +
+          'Please fund this account with at least 1-2 XLM to enable transaction submission.',
+        );
+      }
+      throw new Error(`Failed to fetch keeper account from RPC: ${err.message}`);
+    }
+
+    return { keypair, accountResponse, hsmSigner };
+  }
+
   const secret = await loadSecretKey();
 
   let keypair;
@@ -145,10 +289,8 @@ async function initializeKeeperAccount() {
 
   let accountResponse;
   try {
-    // Fetch account from network
     accountResponse = await server.getAccount(publicKey);
   } catch (err) {
-    // Specific handling for account not found
     if (err.response && err.response.status === 404) {
       throw new Error(
         `Keeper account ${publicKey} not found on-chain. ` +
@@ -342,6 +484,20 @@ function createMultiSigSigner(opts = {}) {
   if (providerType === 'mock') {
     const { MockHSMProvider } = require('./hsm/mockProvider');
     hsmProvider = opts.hsmProvider || new MockHSMProvider({ logger: opts.logger });
+  } else if (providerType === 'aws-kms') {
+    const { AwsKmsProvider } = require('./hsm/awsKmsProvider');
+    hsmProvider = opts.hsmProvider || new AwsKmsProvider({
+      region: opts.awsRegion || process.env.AWS_KMS_REGION,
+      logger: opts.logger,
+    });
+  } else if (providerType === 'vault-transit') {
+    const { VaultTransitProvider } = require('./hsm/vaultTransitProvider');
+    hsmProvider = opts.hsmProvider || new VaultTransitProvider({
+      vaultAddr: opts.vaultAddr || process.env.VAULT_ADDR,
+      vaultToken: opts.vaultToken || process.env.VAULT_TOKEN,
+      transitPath: opts.transitPath || process.env.VAULT_TRANSIT_PATH,
+      logger: opts.logger,
+    });
   } else {
     // For production PKCS#11 / AWS CloudHSM: the operator is responsible for
     // installing and configuring the appropriate HSMProvider subclass.
@@ -563,4 +719,7 @@ module.exports = {
   checkAndTopUpXlmReserve,
   MultiSigHSMSigner,
   createMultiSigSigner,
+  // HSM/KMS keyless signing (Issue #840 — KMS/Vault provider integration)
+  isHsmOnlyMode,
+  createHsmSigner,
 };
