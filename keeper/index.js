@@ -591,6 +591,17 @@ async function main() {
   });
   metricsServer.setP2PStateProvider(() => p2pNetwork.getStateSnapshot());
   try {
+    await p2pNetwork.start();
+  } catch (err) {
+    logger.warn("P2P network startup failed - continuing with shard ownership", { error: err.message });
+  }
+  p2pNetwork.on("tasks:reassign", ({ nodeId, taskIds }) => {
+    logger.warn("P2P task locks released for reassignment", {
+      nodeId,
+      taskCount: taskIds.length,
+    });
+  });
+  try {
     const startupReport = await reconciler.reconcile();
     logger.info("Startup reconciliation complete", {
       checked: startupReport.checked,
@@ -807,6 +818,11 @@ async function main() {
           taskId: d.taskId,
           context: { pollCorrelationId: d.correlationId }
         }));
+        tasksToEnqueue.forEach((task) => {
+          p2pNetwork.broadcastTaskLock(task.taskId, {
+            correlationId: task.context.pollCorrelationId,
+          });
+        });
         
         await queue.enqueue(tasksToEnqueue, executeTask);
       } else {
@@ -835,8 +851,14 @@ async function main() {
           registry,
           idempotencyGuard,
           includeContext: true,
-        });
+      });
       if (dueTaskIds.length > 0) {
+        dueTaskIds.forEach((task) => {
+          const taskId = typeof task === "object" ? task.taskId : task;
+          p2pNetwork.broadcastTaskLock(taskId, {
+            correlationId: typeof task === "object" ? task.correlationId : null,
+          });
+        });
         await queue.enqueue(dueTaskIds, executeTask);
       }
     } catch (error) {

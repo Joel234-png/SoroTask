@@ -132,6 +132,8 @@ function loadConfig() {
       stalePeerMs: parseInteger(process.env.P2P_STALE_PEER_MS, 45000),
       authWindowMs: parseInteger(process.env.P2P_AUTH_WINDOW_MS, 30000),
       connectTimeoutMs: parseInteger(process.env.P2P_CONNECT_TIMEOUT_MS, 5000),
+      transport: process.env.P2P_TRANSPORT || 'socketio',
+      taskLockTtlMs: parseInteger(process.env.P2P_TASK_LOCK_TTL_MS, 60000),
     },
     // RPC Load Balancer Configuration
     rpcEndpoints: process.env.RPC_ENDPOINTS || null,
