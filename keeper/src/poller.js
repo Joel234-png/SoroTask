@@ -1,9 +1,11 @@
 const { Contract, xdr, TransactionBuilder, BASE_FEE, Networks, scValToNative } = require('@stellar/stellar-sdk');
 const { createRateLimiter } = require('./concurrency');
+const { DistributedRateLimiter } = require('./distributedRateLimiter');
 const { createLogger } = require('./logger');
 const { validateTaskPayload } = require('./taskValidator');
 const { TaskFilterChain } = require('./taskFilter');
 const { SimulationCache } = require('./simulationCache');
+const { TaskMetadataCache } = require('./taskMetadataCache');
 const { ReadBatcher } = require('./readBatcher');
 const crypto = require('crypto');
 
@@ -89,6 +91,23 @@ class TaskPoller {
       },
     });
 
+    // Cluster-wide (distributed) RPC rate limiter — Issue #849.
+    // This gates RPC reads across ALL keeper processes via Redis, enforcing a
+    // single global budget. It composes with (does not replace) the per-process
+    // `readLimit` above: the local limiter protects against a single process's
+    // burst, the distributed one enforces the cluster-wide global limit.
+    // If REDIS_URL is unset it is a no-op passthrough (see distributedRateLimiter.js),
+    // so single-instance/dev deployments are unaffected.
+    this.distributedReadLimit = options.distributedRateLimiter || new DistributedRateLimiter({
+      redis: options.redisClient || null,
+      redisUrl: options.redisUrl !== undefined ? options.redisUrl : process.env.REDIS_URL,
+      limit: parseInt(
+        options.rpcGlobalRateLimit || process.env.RPC_GLOBAL_RATE_LIMIT || '100',
+        10,
+      ),
+      logger: this.logger,
+    });
+
     // Statistics
     this.stats = {
       lastPollTime: null,
@@ -146,6 +165,14 @@ class TaskPoller {
       );
     } else {
       this.batcher = null;
+    }
+
+    // Optional task metadata cache — LRU cache with event-driven invalidation.
+    // When provided, this is checked before the simulation cache and RPC calls.
+    if (options.taskMetadataCache instanceof TaskMetadataCache) {
+      this.taskMetadataCache = options.taskMetadataCache;
+    } else {
+      this.taskMetadataCache = null;
     }
   }
 
@@ -261,6 +288,9 @@ class TaskPoller {
         this.readLimit(async () => {
           const startedAt = Date.now();
           const correlationId = `poll-${taskId}-${crypto.randomBytes(4).toString('hex')}`;
+          // Cluster-wide gate: wait for a global RPC token before issuing the
+          // per-task read. No-op passthrough when Redis is not configured.
+          await this.distributedReadLimit.acquire();
           const preloaded = preloadedConfigs ? preloadedConfigs.get(Number(taskId)) : undefined;
           const result = await this.checkTask(
             taskId,
@@ -467,27 +497,58 @@ class TaskPoller {
       : this.logger;
 
     try {
-      // Check cache first for task configuration
-      const cachedConfig = this.simulationCache.get(taskId);
-      let taskConfig;
+      // Check caches in priority order: taskMetadataCache → simulationCache → preloaded → RPC
+      let taskConfig = null;
+      let cacheSource = null;
 
-      if (cachedConfig) {
-        taskConfig = cachedConfig;
-      } else if (options.preloadedConfig !== undefined) {
+      // L1: Task metadata LRU cache (event-driven invalidation, 60s TTL)
+      if (this.taskMetadataCache) {
+        const metaCached = this.taskMetadataCache.get(taskId);
+        if (metaCached) {
+          taskConfig = metaCached;
+          cacheSource = 'metadata_cache';
+        }
+      }
+
+      // L2: Simulation cache (shorter TTL, no event invalidation)
+      if (!taskConfig) {
+        const cachedConfig = this.simulationCache.get(taskId);
+        if (cachedConfig) {
+          taskConfig = cachedConfig;
+          cacheSource = 'simulation_cache';
+        }
+      }
+
+      // L3: Pre-loaded config from ReadBatcher
+      if (!taskConfig && options.preloadedConfig !== undefined) {
         // Use config pre-fetched by ReadBatcher — no extra RPC call needed.
         // preloadedConfig is null when the task was not found in the batch response.
         taskConfig = options.preloadedConfig || null;
         if (taskConfig) {
+          cacheSource = 'batch_preload';
           this.simulationCache.set(taskId, taskConfig);
+          if (this.taskMetadataCache) {
+            this.taskMetadataCache.set(taskId, taskConfig);
+          }
         }
-      } else {
-        // Read task configuration from contract using view call (per-task fallback)
-        taskConfig = await this.getTaskConfig(taskId);
+      }
 
-        // Cache the result for future polls
+      // L4: RPC fallback — read task configuration from contract via view call
+      if (!taskConfig) {
+        taskConfig = await this.getTaskConfig(taskId);
+        cacheSource = 'rpc';
+
+        // Populate both caches for future polls
         if (taskConfig) {
           this.simulationCache.set(taskId, taskConfig);
+          if (this.taskMetadataCache) {
+            this.taskMetadataCache.set(taskId, taskConfig);
+          }
         }
+      }
+
+      if (cacheSource) {
+        taskLogger.debug('Task config source', { taskId, source: cacheSource });
       }
 
       if (!taskConfig) {
