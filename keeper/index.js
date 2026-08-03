@@ -17,7 +17,7 @@ const HistoryManager = require("./src/history");
 const { StreamHub } = require("./src/streamHub");
 const { ApiGateway } = require("./src/apiGateway");
 const { FailurePredictor, KeeperReputationScorer } = require("./src/insights");
-const { normalizeShardConfig, filterTasksForShard } = require("./src/sharding");
+const { normalizeShardConfig, ConsistentHashRing, filterTasksByHashRing } = require("./src/sharding");
 const { PostgresShardManager } = require("./src/postgresShardManager");
 const { StartupValidator } = require("./src/validator");
 const { ReconciliationEngine } = require("./src/reconciliation");
@@ -70,7 +70,7 @@ async function main() {
     process.exit(1);
   }
 
-  const { keypair } = keeperData;
+  const { keypair, hsmSigner } = keeperData;
   const historyManager = new HistoryManager({
     logger: createLogger("history"),
   });
@@ -393,13 +393,14 @@ async function main() {
     const correlationId = context.correlationId || context.pollCorrelationId || context.attemptId;
     const taskLogger = correlationId ? logger.childWithTrace(correlationId) : logger;
     
-    const account = await server.getAccount(keypair.publicKey());
+      const account = await server.getAccount(keypair.publicKey());
     const deps = {
       server,
       keypair,
       account,
       contractId: config.contractId,
       networkPassphrase: config.networkPassphrase || Networks.FUTURENET,
+      hsmSigner,
     };
 
     if (DRY_RUN) {
@@ -590,6 +591,42 @@ async function main() {
     },
   });
   metricsServer.setP2PStateProvider(() => p2pNetwork.getStateSnapshot());
+
+  const hashRing = new ConsistentHashRing({
+    virtualNodeCount: parseInt(process.env.HASH_RING_VNODES || '150', 10),
+  });
+
+  function rebuildHashRing() {
+    const logger = createLogger('hash-ring');
+    hashRing.clear();
+    if (p2pNetwork.enabled && p2pNetwork.started) {
+      hashRing.addNode(p2pNetwork.nodeId);
+      const peers = p2pNetwork.getHealthyPeers();
+      for (const peer of peers) {
+        hashRing.addNode(peer.nodeId);
+      }
+      logger.info('Hash ring rebuilt from P2P network', {
+        selfNode: p2pNetwork.nodeId,
+        peers: peers.length,
+        totalNodes: hashRing.getNodeCount(),
+      });
+    } else {
+      for (let i = 0; i < shardConfig.shardCount; i++) {
+        hashRing.addNode(`keeper-shard-${i}`);
+      }
+      logger.info('Hash ring rebuilt from static shard config', {
+        shardCount: shardConfig.shardCount,
+        selfShard: shardConfig.shardIndex,
+        totalNodes: hashRing.getNodeCount(),
+      });
+    }
+  }
+
+  rebuildHashRing();
+
+  p2pNetwork.on('peer:updated', () => rebuildHashRing());
+  p2pNetwork.on('peer:stale', () => rebuildHashRing());
+
   try {
     const startupReport = await reconciler.reconcile();
     logger.info("Startup reconciliation complete", {
@@ -717,7 +754,10 @@ async function main() {
       });
       return p2pSelection;
     }
-    return filterTasksForShard(taskIds, shardConfig);
+    const selfNodeId = p2pNetwork.enabled && p2pNetwork.started
+      ? p2pNetwork.nodeId
+      : `keeper-shard-${shardConfig.shardIndex}`;
+    return filterTasksByHashRing(taskIds, hashRing, selfNodeId);
   };
 
   // Polling loop
