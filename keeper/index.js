@@ -70,7 +70,7 @@ async function main() {
     process.exit(1);
   }
 
-  const { keypair } = keeperData;
+  const { keypair, hsmSigner } = keeperData;
   const historyManager = new HistoryManager({
     logger: createLogger("history"),
   });
@@ -393,13 +393,14 @@ async function main() {
     const correlationId = context.correlationId || context.pollCorrelationId || context.attemptId;
     const taskLogger = correlationId ? logger.childWithTrace(correlationId) : logger;
     
-    const account = await server.getAccount(keypair.publicKey());
+      const account = await server.getAccount(keypair.publicKey());
     const deps = {
       server,
       keypair,
       account,
       contractId: config.contractId,
       networkPassphrase: config.networkPassphrase || Networks.FUTURENET,
+      hsmSigner,
     };
 
     if (DRY_RUN) {
