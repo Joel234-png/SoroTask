@@ -669,6 +669,18 @@ pub struct VrfResponse {
 }
 
 #[contracttype]
+#[derive(Clone, Debug)]
+pub struct VrfKeeperAssignment {
+    pub task_id: u64,
+    pub request_id: u64,
+    pub keepers: Vec<Address>,
+    pub winner: Option<Address>,
+    pub random_number: Option<i128>,
+    pub requested_at: u64,
+    pub fulfilled_at: u64,
+}
+
+#[contracttype]
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
 pub enum ClaimStatus {
     Active,
@@ -838,6 +850,7 @@ pub enum DataKey {
     VrfRequestCounter,
     VrfRequests(u64),
     VrfResponses(u64),
+    VrfKeeperAssignment(u64),
     OracleConfig(OracleProvider),
     OracleRequestCounter,
     OracleRequests(u64),
@@ -2030,6 +2043,106 @@ impl SoroTaskContract {
         exit_security_guard(&env);
     }
 
+    /// Requests a VRF-backed keeper assignment for a due/high-value task.
+    ///
+    /// The task creator supplies the eligible keeper set. Once the configured
+    /// Pyth/Band VRF adapter fulfills the request, the contract stores a single
+    /// winning keeper and rejects execution attempts from other keepers.
+    pub fn request_vrf_keeper_assignment(env: Env, task_id: u64, keepers: Vec<Address>) -> u64 {
+        enter_security_guard(&env);
+        Self::check_feature_enabled(&env, FEATURE_VRF);
+
+        if keepers.is_empty() {
+            panic_with_error!(&env, Error::InvalidVrfRequest);
+        }
+        if keepers.len() > MAX_ARGS_COUNT {
+            panic_with_error!(&env, Error::ArgsTooMany);
+        }
+        for i in 0..keepers.len() {
+            let left = keepers.get(i).unwrap();
+            let mut j = i + 1;
+            while j < keepers.len() {
+                if left == keepers.get(j).unwrap() {
+                    panic_with_error!(&env, Error::InvalidVrfRequest);
+                }
+                j += 1;
+            }
+        }
+
+        let _oracle_address: Address = env
+            .storage()
+            .instance()
+            .get(&DataKey::VrfOracleAddress)
+            .ok_or(Error::VrfOracleNotSet)
+            .expect("VRF oracle address not set");
+
+        let task_key = DataKey::Task(task_id);
+        let config: TaskConfig = env
+            .storage()
+            .persistent()
+            .get(&task_key)
+            .ok_or(Error::TaskNotFound)
+            .expect("Task not found");
+        config.creator.require_auth();
+
+        if !config.whitelist.is_empty() {
+            for i in 0..keepers.len() {
+                let keeper = keepers.get(i).unwrap();
+                if !config.whitelist.contains(&keeper) {
+                    panic_with_error!(&env, Error::Unauthorized);
+                }
+            }
+        }
+
+        let mut request_counter: u64 = env
+            .storage()
+            .instance()
+            .get(&DataKey::VrfRequestCounter)
+            .unwrap_or(0);
+        request_counter += 1;
+        env.storage()
+            .instance()
+            .set(&DataKey::VrfRequestCounter, &request_counter);
+
+        let request = VrfRequest {
+            request_id: request_counter,
+            task_id,
+            requester: config.creator.clone(),
+            callback_function: Symbol::new(&env, "vrf_keeper"),
+            callback_args: Vec::new(&env),
+            status: VrfRequestStatus::Pending,
+            created_at: env.ledger().timestamp(),
+        };
+        env.storage()
+            .persistent()
+            .set(&DataKey::VrfRequests(request_counter), &request);
+
+        let assignment = VrfKeeperAssignment {
+            task_id,
+            request_id: request_counter,
+            keepers,
+            winner: None,
+            random_number: None,
+            requested_at: env.ledger().timestamp(),
+            fulfilled_at: 0,
+        };
+        env.storage()
+            .persistent()
+            .set(&DataKey::VrfKeeperAssignment(task_id), &assignment);
+
+        env.events().publish(
+            (
+                Symbol::new(&env, "VrfKeeperAssignmentRequested"),
+                Symbol::new(&env, "v1"),
+                task_id,
+            ),
+            request_counter,
+        );
+
+        exit_security_guard(&env);
+        request_counter
+    }
+
     /// Sets the configuration for a specific Oracle provider.
     pub fn set_oracle_config(
         env: Env,
@@ -2236,6 +2349,13 @@ impl SoroTaskContract {
         env.storage()
             .persistent()
             .set(&DataKey::VrfResponses(request_id), &vrf_response);
+
+        Self::fulfill_vrf_keeper_assignment_internal(
+            &env,
+            vrf_request.task_id,
+            request_id,
+            random_number,
+        );
 
         // Emit VrfRequestFulfilled event
         env.events().publish(
@@ -2839,6 +2959,8 @@ impl SoroTaskContract {
             env, task_id, keeper, ExecutionStep::CheckWhitelist, StepResult::Passed, 0,
         );
 
+        Self::require_vrf_keeper_winner(env, task_id, keeper);
+
         // ── 5. Check interval ─────────────────────────────────────────────
         if env.ledger().timestamp() < config.last_run + config.interval as u64 {
             trace_steps.push_back(events::ExecutionStepRecord {
@@ -3147,6 +3269,9 @@ impl SoroTaskContract {
             config.last_run = env.ledger().timestamp();
             env.storage().persistent().set(&task_key, &config);
             env.storage().persistent().extend_ttl(&task_key, 100_000, 100_000);
+            env.storage()
+                .persistent()
+                .remove(&DataKey::VrfKeeperAssignment(task_id));
             Self::set_task_status(env, task_id, ExecutionOutcome::Success);
             final_outcome = ExecutionOutcome::Success;
 
@@ -6446,6 +6571,102 @@ impl SoroTaskContract {
             .get::<DataKey, RandomSeedRotation>(&DataKey::KeeperRandomSeed)
             .map(|r| r.current_seed)
             .unwrap_or_else(|| BytesN::from_array(&env, &[0u8; 32]))
+    }
+
+    fn select_keeper_from_vrf_seed(
+        env: &Env,
+        task_id: u64,
+        request_id: u64,
+        random_number: i128,
+        keepers: &Vec<Address>,
+    ) -> Address {
+        if keepers.is_empty() {
+            panic_with_error!(env, Error::InvalidVrfRequest);
+        }
+
+        let mut buf = Bytes::new(env);
+        buf.append(&random_number.to_xdr(env));
+        buf.append(&task_id.to_xdr(env));
+        buf.append(&request_id.to_xdr(env));
+        buf.append(&env.ledger().sequence().to_xdr(env));
+
+        let hash: BytesN<32> = env.crypto().sha256(&buf).into();
+        let hash_arr = hash.to_array();
+        let index_seed = ((hash_arr[0] as u32) << 24)
+            | ((hash_arr[1] as u32) << 16)
+            | ((hash_arr[2] as u32) << 8)
+            | hash_arr[3] as u32;
+        keepers.get(index_seed % keepers.len()).unwrap()
+    }
+
+    fn fulfill_vrf_keeper_assignment_internal(
+        env: &Env,
+        task_id: u64,
+        request_id: u64,
+        random_number: i128,
+    ) {
+        if let Some(mut assignment) = env
+            .storage()
+            .persistent()
+            .get::<DataKey, VrfKeeperAssignment>(&DataKey::VrfKeeperAssignment(task_id))
+        {
+            if assignment.request_id != request_id || assignment.winner.is_some() {
+                return;
+            }
+
+            let winner = Self::select_keeper_from_vrf_seed(
+                env,
+                task_id,
+                request_id,
+                random_number,
+                &assignment.keepers,
+            );
+            assignment.winner = Some(winner.clone());
+            assignment.random_number = Some(random_number);
+            assignment.fulfilled_at = env.ledger().timestamp();
+
+            env.storage()
+                .persistent()
+                .set(&DataKey::VrfKeeperAssignment(task_id), &assignment);
+
+            env.events().publish(
+                (
+                    Symbol::new(env, "VrfKeeperAssigned"),
+                    Symbol::new(env, "v1"),
+                    task_id,
+                ),
+                (request_id, winner),
+            );
+        }
+    }
+
+    fn require_vrf_keeper_winner(env: &Env, task_id: u64, keeper: &Address) {
+        if let Some(assignment) = env
+            .storage()
+            .persistent()
+            .get::<DataKey, VrfKeeperAssignment>(&DataKey::VrfKeeperAssignment(task_id))
+        {
+            match assignment.winner {
+                Some(winner) => {
+                    if winner != keeper.clone() {
+                        panic_with_error!(env, Error::Unauthorized);
+                    }
+                }
+                None => panic_with_error!(env, Error::InvalidVrfRequest),
+            }
+        }
+    }
+
+    /// Returns the current VRF keeper assignment for a task, if one exists.
+    pub fn get_vrf_keeper_assignment(env: Env, task_id: u64) -> Option<VrfKeeperAssignment> {
+        env.storage()
+            .persistent()
+            .get(&DataKey::VrfKeeperAssignment(task_id))
+    }
+
+    /// Returns the fulfilled VRF winner for a task, if randomness has arrived.
+    pub fn get_vrf_keeper_winner(env: Env, task_id: u64) -> Option<Address> {
+        Self::get_vrf_keeper_assignment(env, task_id).and_then(|assignment| assignment.winner)
     }
 
     /// Selects a winning keeper pseudo-randomly for high-value task queues via seed entropy.
@@ -10147,6 +10368,53 @@ pub(crate) mod tests {
 
         let winner = client.select_keeper_via_lottery(&42u64, &keepers);
         assert!(winner == keeper1 || winner == keeper2);
+    }
+
+    #[test]
+    fn test_vrf_keeper_assignment_enforces_winner() {
+        let env = Env::default();
+        env.mock_all_auths();
+
+        let contract_id = env.register_contract(None, SoroTaskContract);
+        let client = SoroTaskContractClient::new(&env, &contract_id);
+
+        let admin = Address::generate(&env);
+        let oracle = Address::generate(&env);
+        client.set_admin_address(&admin);
+        client.set_vrf_oracle_address(&oracle);
+
+        let target = env.register(MockTarget, ());
+        let config = base_config(&env, target);
+        let task_id = client.register(&config);
+
+        let keeper_a = Address::generate(&env);
+        let keeper_b = Address::generate(&env);
+        let keepers = vec![&env, keeper_a.clone(), keeper_b.clone()];
+
+        let request_id = client.request_vrf_keeper_assignment(&task_id, &keepers);
+        let pending = client.get_vrf_keeper_assignment(&task_id).unwrap();
+        assert_eq!(pending.request_id, request_id);
+        assert!(pending.winner.is_none());
+
+        let proof = Bytes::from_slice(&env, &[1, 2, 3, 4]);
+        client.fulfill_vrf_request(&request_id, &987_654_321i128, &proof);
+
+        let winner = client.get_vrf_keeper_winner(&task_id).unwrap();
+        assert!(winner == keeper_a || winner == keeper_b);
+
+        let loser = if winner == keeper_a {
+            keeper_b.clone()
+        } else {
+            keeper_a.clone()
+        };
+
+        set_timestamp(&env, 3_600);
+        let loser_result = client.try_execute(&loser, &task_id);
+        assert!(loser_result.is_err());
+
+        client.execute(&winner, &task_id);
+        assert_eq!(client.get_task(&task_id).unwrap().last_run, 3_600);
+        assert!(client.get_vrf_keeper_assignment(&task_id).is_none());
     }
 
     #[test]
