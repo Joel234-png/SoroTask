@@ -132,6 +132,8 @@ function loadConfig() {
       stalePeerMs: parseInteger(process.env.P2P_STALE_PEER_MS, 45000),
       authWindowMs: parseInteger(process.env.P2P_AUTH_WINDOW_MS, 30000),
       connectTimeoutMs: parseInteger(process.env.P2P_CONNECT_TIMEOUT_MS, 5000),
+      transport: process.env.P2P_TRANSPORT || 'socketio',
+      taskLockTtlMs: parseInteger(process.env.P2P_TASK_LOCK_TTL_MS, 60000),
     },
     // RPC Load Balancer Configuration
     rpcEndpoints: process.env.RPC_ENDPOINTS || null,
@@ -149,6 +151,13 @@ function loadConfig() {
     readBatchSize: parseInteger(process.env.READ_BATCH_SIZE, 50),
     batchConcurrency: parseInteger(process.env.BATCH_CONCURRENCY, 2),
     batchRps: parseInteger(process.env.BATCH_RPS, 10),
+    // Task metadata cache configuration
+    // LRU cache for task configurations with event-driven invalidation.
+    // Reduces redundant RPC state queries by caching task metadata in-memory
+    // and invalidating entries instantly when TaskUpdated events arrive.
+    taskCacheEnabled: parseBoolean(process.env.TASK_CACHE_ENABLED, true),
+    taskCacheTtlSeconds: parseInteger(process.env.TASK_CACHE_TTL_SECONDS, 60),
+    taskCacheMaxSize: parseInteger(process.env.TASK_CACHE_MAX_SIZE, 2000),
     realtimeStreamEnabled: parseBoolean(process.env.REALTIME_STREAM_ENABLED, true),
     realtimeStreamNamespace: process.env.REALTIME_STREAM_NAMESPACE || '/stream',
     apiGatewayEnabled: parseBoolean(process.env.API_GATEWAY_ENABLED, true),

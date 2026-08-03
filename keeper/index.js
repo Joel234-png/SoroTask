@@ -17,7 +17,7 @@ const HistoryManager = require("./src/history");
 const { StreamHub } = require("./src/streamHub");
 const { ApiGateway } = require("./src/apiGateway");
 const { FailurePredictor, KeeperReputationScorer } = require("./src/insights");
-const { normalizeShardConfig, filterTasksForShard } = require("./src/sharding");
+const { normalizeShardConfig, ConsistentHashRing, filterTasksByHashRing } = require("./src/sharding");
 const { PostgresShardManager } = require("./src/postgresShardManager");
 const { StartupValidator } = require("./src/validator");
 const { ReconciliationEngine } = require("./src/reconciliation");
@@ -31,6 +31,9 @@ const { WebhookTriggerHandler } = require("./src/webhookTrigger");
 const { MultiRegionRPCClient } = require("./src/disasterRecovery");
 const { KeeperP2PNetwork } = require("./src/p2pNetwork");
 const { KeeperAlertManager } = require("./src/keeperAlerts");
+const { TaskMetadataCache } = require("./src/taskMetadataCache");
+const { FraudDetectionService } = require("./src/fraudDetection");
+const { SLAMonitor } = require("./src/slaMonitor");
 
 // Create root logger for the main module
 const logger = createLogger("keeper");
@@ -67,7 +70,7 @@ async function main() {
     process.exit(1);
   }
 
-  const { keypair } = keeperData;
+  const { keypair, hsmSigner } = keeperData;
   const historyManager = new HistoryManager({
     logger: createLogger("history"),
   });
@@ -134,6 +137,14 @@ async function main() {
   metricsServer.setApiGateway(config.apiGatewayEnabled ? apiGateway : null);
   metricsServer.setFailurePredictor(failurePredictor);
   metricsServer.setReputationScorer(reputationScorer);
+
+  const fraudDetector = new FraudDetectionService({
+    logger: createLogger("fraud-detector"),
+    metricsServer,
+    historyManager,
+  });
+  metricsServer.fraudDetector = fraudDetector;
+
   metricsServer.updateShardState({
     shardIndex: shardConfig.shardIndex,
     shardCount: shardConfig.shardCount,
@@ -165,6 +176,18 @@ async function main() {
 
   const alertManager = new KeeperAlertManager();
   alertManager.startRpcMonitor(() => server.getLatestLedger());
+
+  const slaMonitor = new SLAMonitor(server, config.contractId, config, {
+    historyManager,
+    metricsServer,
+    logger: createLogger("sla-monitor"),
+    operatorKeypair: keypair,
+  });
+
+  if (slaMonitor.enabled) {
+    await slaMonitor.start();
+    logger.info("SLA monitor started");
+  }
 
   // Perform startup validation to fail fast on configuration errors
   const validator = new StartupValidator(
@@ -213,6 +236,20 @@ async function main() {
 
   const shutdownManager = new GracefulShutdownManager(logger);
 
+  // Initialize task metadata LRU cache (event wiring deferred until registry is ready)
+  let taskMetadataCache = null;
+  if (config.taskCacheEnabled) {
+    taskMetadataCache = new TaskMetadataCache({
+      ttlSeconds: config.taskCacheTtlSeconds,
+      maxSize: config.taskCacheMaxSize,
+      logger: createLogger("task-cache"),
+    });
+    logger.info("Task metadata cache created", {
+      ttlSeconds: config.taskCacheTtlSeconds,
+      maxSize: config.taskCacheMaxSize,
+    });
+  }
+
   // Initialize polling engine with logger and filter chain
   const poller = new TaskPoller(server, config.contractId, {
     maxConcurrentReads: process.env.MAX_CONCURRENT_READS,
@@ -228,6 +265,7 @@ async function main() {
     driftWarningSeconds: config.driftWarningSeconds,
     driftCriticalSeconds: config.driftCriticalSeconds,
     config,
+    taskMetadataCache,
   });
   logger.info("Poller initialized", { contractId: config.contractId });
 
@@ -243,7 +281,7 @@ async function main() {
       pollCorrelationId: context?.pollCorrelationId || null,
     });
   });
-  queue.on("task:success", (taskId) => {
+  queue.on("task:success", (taskId, context) => {
     queueLogger.info("Task executed successfully", { taskId });
     const executionResult = context?.executionResult || null;
     const finalResult = executionResult?.result || executionResult || {};
@@ -317,6 +355,9 @@ async function main() {
     alertManager.recordFailure({ taskId, error: err.message });
     shutdownManager.failTask(taskId, err);
     poller.invalidateCache(taskId);
+    if (taskMetadataCache) {
+      taskMetadataCache.invalidate(taskId);
+    }
     metricsServer.publishTaskEvent("queue-failed", taskId, { error: err.message });
   });
   queue.on("task:skipped", (taskId, context) =>
@@ -333,6 +374,15 @@ async function main() {
       pollCorrelationId: context?.pollCorrelationId || null,
     });
   });
+  queue.on("task:skipped", (taskId) => {
+    shutdownManager.completeTask(taskId);
+  });
+  queue.on("task:lock-acquired", (taskId, token) => {
+    shutdownManager.trackRedisLock(taskId, token);
+  });
+  queue.on("task:lock-released", (taskId) => {
+    shutdownManager.untrackRedisLock(taskId);
+  });
   queue.on("cycle:complete", (stats) =>
     queueLogger.info("Cycle complete", stats),
   );
@@ -343,13 +393,14 @@ async function main() {
     const correlationId = context.correlationId || context.pollCorrelationId || context.attemptId;
     const taskLogger = correlationId ? logger.childWithTrace(correlationId) : logger;
     
-    const account = await server.getAccount(keypair.publicKey());
+      const account = await server.getAccount(keypair.publicKey());
     const deps = {
       server,
       keypair,
       account,
       contractId: config.contractId,
       networkPassphrase: config.networkPassphrase || Networks.FUTURENET,
+      hsmSigner,
     };
 
     if (DRY_RUN) {
@@ -495,6 +546,16 @@ async function main() {
   });
   await registry.init();
 
+  // Wire event-driven cache invalidation now that the registry is initialized.
+  // Registry events (TaskPaused, GasDeposited, KeeperPaid, etc.) instantly
+  // invalidate the affected cache entry so stale data is never served.
+  if (taskMetadataCache) {
+    registry.on("task:updated", ({ taskId }) => {
+      taskMetadataCache.invalidate(taskId);
+    });
+    logger.info("Task metadata cache wired to registry events");
+  }
+
   let reconciliationEngine = new ReconciliationEngine({
     logger: createLogger("reconciliation"),
     metricsServer,
@@ -530,6 +591,53 @@ async function main() {
     },
   });
   metricsServer.setP2PStateProvider(() => p2pNetwork.getStateSnapshot());
+
+  const hashRing = new ConsistentHashRing({
+    virtualNodeCount: parseInt(process.env.HASH_RING_VNODES || '150', 10),
+  });
+
+  function rebuildHashRing() {
+    const logger = createLogger('hash-ring');
+    hashRing.clear();
+    if (p2pNetwork.enabled && p2pNetwork.started) {
+      hashRing.addNode(p2pNetwork.nodeId);
+      const peers = p2pNetwork.getHealthyPeers();
+      for (const peer of peers) {
+        hashRing.addNode(peer.nodeId);
+      }
+      logger.info('Hash ring rebuilt from P2P network', {
+        selfNode: p2pNetwork.nodeId,
+        peers: peers.length,
+        totalNodes: hashRing.getNodeCount(),
+      });
+    } else {
+      for (let i = 0; i < shardConfig.shardCount; i++) {
+        hashRing.addNode(`keeper-shard-${i}`);
+      }
+      logger.info('Hash ring rebuilt from static shard config', {
+        shardCount: shardConfig.shardCount,
+        selfShard: shardConfig.shardIndex,
+        totalNodes: hashRing.getNodeCount(),
+      });
+    }
+  }
+
+  rebuildHashRing();
+
+  p2pNetwork.on('peer:updated', () => rebuildHashRing());
+  p2pNetwork.on('peer:stale', () => rebuildHashRing());
+
+  try {
+    await p2pNetwork.start();
+  } catch (err) {
+    logger.warn("P2P network startup failed - continuing with shard ownership", { error: err.message });
+  }
+  p2pNetwork.on("tasks:reassign", ({ nodeId, taskIds }) => {
+    logger.warn("P2P task locks released for reassignment", {
+      nodeId,
+      taskCount: taskIds.length,
+    });
+  });
   try {
     const startupReport = await reconciler.reconcile();
     logger.info("Startup reconciliation complete", {
@@ -614,6 +722,20 @@ async function main() {
     });
   });
 
+  // Register execution queue drain
+  shutdownManager.registerResource("execution-queue", async () => {
+    logger.info("Draining execution queue");
+    await queue.drain({
+      drainTimeoutMs: shutdownManager.drainTimeoutMs,
+    });
+  });
+
+  // Register metrics server stop
+  shutdownManager.registerResource("metrics-server", async () => {
+    logger.info("Stopping metrics server");
+    metricsServer.stop();
+  });
+
   // Initialize and start listening for signals
   shutdownManager.init();
 
@@ -624,8 +746,9 @@ async function main() {
 
   shutdownManager.on("shutdown:stop-accepting", () => {
     logger.info("Stopped accepting new work");
-    // Stop the polling loop explicitly
+    // Stop the polling loops explicitly
     clearInterval(pollingInterval);
+    clearInterval(reconcileInterval);
   });
 
   shutdownManager.on("shutdown:force", () => {
@@ -642,7 +765,10 @@ async function main() {
       });
       return p2pSelection;
     }
-    return filterTasksForShard(taskIds, shardConfig);
+    const selfNodeId = p2pNetwork.enabled && p2pNetwork.started
+      ? p2pNetwork.nodeId
+      : `keeper-shard-${shardConfig.shardIndex}`;
+    return filterTasksByHashRing(taskIds, hashRing, selfNodeId);
   };
 
   // Polling loop
@@ -664,7 +790,7 @@ async function main() {
     }
 
     try {
-      if (isShuttingDown) {
+      if (shutdownManager.isShuttingDown) {
         logger.warn('Skipping polling cycle because shutdown is in progress');
         return;
       }
@@ -732,6 +858,11 @@ async function main() {
           taskId: d.taskId,
           context: { pollCorrelationId: d.correlationId }
         }));
+        tasksToEnqueue.forEach((task) => {
+          p2pNetwork.broadcastTaskLock(task.taskId, {
+            correlationId: task.context.pollCorrelationId,
+          });
+        });
         
         await queue.enqueue(tasksToEnqueue, executeTask);
       } else {
@@ -743,49 +874,11 @@ async function main() {
       }
     }, pollingIntervalMs);
 
-  let isShuttingDown = false;
-  const shutdownTimeoutMs = parseInt(process.env.SHUTDOWN_TIMEOUT_MS || '30000', 10);
-
-  const shutdown = async (signal) => {
-    if (isShuttingDown) {
-      logger.warn('Shutdown already in progress, ignoring repeated signal', { signal });
-      return;
-    }
-
-    isShuttingDown = true;
-    logger.info('Received shutdown signal, starting graceful shutdown', {
-      signal,
-      shutdownTimeoutMs,
-    });
-    clearInterval(pollingInterval);
-    clearInterval(reconcileInterval);
-    await queue.drain();
-    metricsServer.stop();
-    logger.info("Graceful shutdown complete, exiting");
-    process.exit(0);
-  };
-
-  process.on('SIGTERM', () => {
-    if (isShuttingDown) {
-      logger.fatal('Second shutdown signal received, forcing exit', { signal: 'SIGTERM' });
-      process.exit(1);
-    }
-    shutdown('SIGTERM');
-  });
-
-  process.on('SIGINT', () => {
-    if (isShuttingDown) {
-      logger.fatal('Second shutdown signal received, forcing exit', { signal: 'SIGINT' });
-      process.exit(1);
-    }
-    shutdown('SIGINT');
-  });
-
   // Run first poll immediately
   logger.info('Running initial poll');
   setTimeout(async () => {
     try {
-      if (isShuttingDown) {
+      if (shutdownManager.isShuttingDown) {
         logger.warn('Skipping initial poll because shutdown is in progress');
         return;
       }
@@ -798,8 +891,14 @@ async function main() {
           registry,
           idempotencyGuard,
           includeContext: true,
-        });
+      });
       if (dueTaskIds.length > 0) {
+        dueTaskIds.forEach((task) => {
+          const taskId = typeof task === "object" ? task.taskId : task;
+          p2pNetwork.broadcastTaskLock(taskId, {
+            correlationId: typeof task === "object" ? task.correlationId : null,
+          });
+        });
         await queue.enqueue(dueTaskIds, executeTask);
       }
     } catch (error) {

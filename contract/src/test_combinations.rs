@@ -99,6 +99,7 @@ mod test_combinations {
             whitelist: Vec::new(env),
             is_active: true,
             blocked_by: Vec::new(env),
+            permissions: 15,
         }
     }
 

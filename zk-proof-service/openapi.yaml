@@ -121,6 +121,67 @@ paths:
         '503':
           $ref: '#/components/responses/ServiceUnavailable'
 
+  /proofs/async:
+    post:
+      tags:
+        - Proofs
+      summary: Enqueue asynchronous ZK proof generation
+      description: |
+        Enqueues an asynchronous proof calculation job to avoid HTTP timeouts on complex circuits.
+        Returns a job identifier (`jobId`) immediately with status `queued`.
+      operationId: enqueueAsyncProof
+      security:
+        - BearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/GenerateProofRequest'
+      responses:
+        '202':
+          description: Proof job enqueued successfully
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  jobId:
+                    type: string
+                    format: uuid
+                  status:
+                    type: string
+                    example: queued
+                  taskId:
+                    type: integer
+                  createdAt:
+                    type: string
+                    format: date-time
+
+  /proofs/{job_id}/stream:
+    get:
+      tags:
+        - Proofs
+      summary: Stream proof generation progress via Server-Sent Events (SSE)
+      description: |
+        Establishes an SSE stream delivering progress updates (`queued`, `processing` %, `completed`, `failed`)
+        and final proof payload upon completion.
+      operationId: streamProofProgress
+      parameters:
+        - name: job_id
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+      responses:
+        '200':
+          description: SSE stream established
+          content:
+            text/event-stream:
+              schema:
+                type: string
+
   /verify-proof:
     post:
       tags:
