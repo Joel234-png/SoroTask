@@ -77,6 +77,13 @@ pub enum Error {
     ChallengeWindowClosed = 48,
     ChallengeWindowActive = 49,
     FraudProofInvalid = 50,
+    EmptyBundle = 51,
+    BundleTooLarge = 52,
+    BundleStepFailed = 53,
+    BlockExecutionLimitReached = 54,
+    DecryptionFailed = 55,
+    InsufficientDelegation = 56,
+    InvalidCommissionRate = 57,
 }
 
 #[contracttype]
@@ -164,9 +171,13 @@ const MAX_ARGS_SIZE_BYTES: u32 = 4096;
 const FIXED_EXECUTION_FEE: i128 = 100;
 const MAX_DEPENDENCIES_PER_TASK: u32 = 16;
 const MAX_DEPENDENCY_DEPTH: u32 = 16;
+/// Maximum number of tasks allowed per ledger block for rate limiting
+const MAX_TASKS_PER_BLOCK: u32 = 50;
 /// Maximum number of tasks allowed in a single batch execution
 const MAX_BATCH_SIZE: u32 = 100;
 
+/// Maximum number of steps allowed in a single atomic task bundle
+const MAX_BUNDLE_STEPS: u32 = 16;
 /// Ledgers a submitted optimistic resolver-condition claim stays open to
 /// challenge before it can be finalized.
 const OPTIMISTIC_CHALLENGE_WINDOW_LEDGERS: u32 = 100;
@@ -200,6 +211,41 @@ pub struct TaskConfig {
     pub yield_strategy: Option<u64>,
     /// Gas-optimized bitmask vector for role-based permissions
     pub permissions: u32,
+}
+
+/// A single invocation within a [`TaskBundle`]: `target::function(args)`.
+///
+/// When `forward_result` is `true`, the `Val` returned by this step's
+/// invocation is appended as the final argument of the *next* step's `args`,
+/// letting one dApp call (e.g. a DEX swap) feed its output into the next
+/// (e.g. a lending deposit).
+#[contracttype]
+#[derive(Clone, Debug)]
+pub struct TaskStep {
+    pub target: Address,
+    pub function: Symbol,
+    pub args: Vec<Val>,
+    pub forward_result: bool,
+}
+
+/// Per-step outcome recorded after an atomic bundle execution completes,
+/// for off-chain introspection of what each leg of the bundle returned.
+#[contracttype]
+#[derive(Clone, Debug)]
+pub struct BundleStepOutcome {
+    pub target: Address,
+    pub function: Symbol,
+    pub succeeded: bool,
+}
+
+/// Record of a completed atomic multi-task bundle execution.
+#[contracttype]
+#[derive(Clone, Debug)]
+pub struct BundleExecutionRecord {
+    pub bundle_id: u64,
+    pub initiator: Address,
+    pub timestamp: u64,
+    pub steps: Vec<BundleStepOutcome>,
 }
 
 #[contracttype]
@@ -915,6 +961,8 @@ pub enum DataKey {
     KeeperDelegators(Address),
     /// Total delegated amount for a given keeper
     KeeperTotalDelegated(Address),
+    BundleCounter,
+    BundleExecution(u64),
 }
 
 fn enter_security_guard(env: &Env) {
@@ -2752,6 +2800,121 @@ impl SoroTaskContract {
             (task_ids.len(), task_ids),
         );
         exit_security_guard(&env);
+    }
+
+    /// Executes an ordered [`TaskStep`] sequence across one or more dApp
+    /// contracts as a single atomic unit ("multi-task bundle swap router").
+    ///
+    /// Each step is invoked in array order via `try_invoke_contract`. When a
+    /// step has `forward_result: true`, the `Val` it returns is appended as
+    /// the last argument to the *next* step's `args` before that step runs,
+    /// so a swap's output can be threaded straight into a lending deposit,
+    /// whose receipt can be threaded into a staking call, etc.
+    ///
+    /// # Atomicity
+    /// If any step's invocation fails, `Error::BundleStepFailed` is raised
+    /// via `panic_with_error!`, which — combined with Soroban's per-invocation
+    /// atomicity — reverts every effect of every step that already ran in
+    /// this bundle (and of the whole enclosing transaction).
+    ///
+    /// # Errors
+    /// - `Error::EmptyBundle`: If `steps` is empty
+    /// - `Error::BundleTooLarge`: If `steps.len() > MAX_BUNDLE_STEPS`
+    /// - `Error::BundleStepFailed`: If any step's cross-contract call fails
+    pub fn execute_task_bundle(env: Env, initiator: Address, steps: Vec<TaskStep>) -> u64 {
+        enter_security_guard(&env);
+        initiator.require_auth();
+
+        if steps.is_empty() {
+            panic_with_error!(&env, Error::EmptyBundle);
+        }
+        if steps.len() > MAX_BUNDLE_STEPS {
+            panic_with_error!(&env, Error::BundleTooLarge);
+        }
+
+        let mut outcomes: Vec<BundleStepOutcome> = Vec::new(&env);
+        let mut forwarded: Option<Val> = None;
+
+        for i in 0..steps.len() {
+            let step = steps.get(i).unwrap();
+
+            let mut call_args = step.args.clone();
+            if let Some(prev_result) = forwarded.take() {
+                call_args.push_back(prev_result);
+            }
+
+            let result = env.try_invoke_contract::<Val, soroban_sdk::Error>(
+                &step.target,
+                &step.function,
+                call_args,
+            );
+
+            let step_result = match result {
+                Ok(Ok(val)) => val,
+                _ => {
+                    outcomes.push_back(BundleStepOutcome {
+                        target: step.target.clone(),
+                        function: step.function.clone(),
+                        succeeded: false,
+                    });
+                    panic_with_error!(&env, Error::BundleStepFailed);
+                }
+            };
+
+            outcomes.push_back(BundleStepOutcome {
+                target: step.target.clone(),
+                function: step.function.clone(),
+                succeeded: true,
+            });
+
+            if step.forward_result {
+                forwarded = Some(step_result);
+            }
+        }
+
+        let bundle_id: u64 = env
+            .storage()
+            .instance()
+            .get(&DataKey::BundleCounter)
+            .unwrap_or(0);
+        let bundle_id = bundle_id + 1;
+        env.storage()
+            .instance()
+            .set(&DataKey::BundleCounter, &bundle_id);
+
+        let record = BundleExecutionRecord {
+            bundle_id,
+            initiator: initiator.clone(),
+            timestamp: env.ledger().timestamp(),
+            steps: outcomes,
+        };
+        env.storage()
+            .persistent()
+            .set(&DataKey::BundleExecution(bundle_id), &record);
+        env.storage().persistent().extend_ttl(
+            &DataKey::BundleExecution(bundle_id),
+            100_000,
+            100_000,
+        );
+
+        env.events().publish(
+            (
+                Symbol::new(&env, "TaskBundleExecuted"),
+                Symbol::new(&env, "v1"),
+                initiator,
+            ),
+            (bundle_id, steps.len()),
+        );
+
+        exit_security_guard(&env);
+        bundle_id
+    }
+
+    /// Returns the persisted record of a previously executed task bundle.
+    pub fn get_bundle_execution(env: Env, bundle_id: u64) -> Option<BundleExecutionRecord> {
+        env.storage()
+            .persistent()
+            .get(&DataKey::BundleExecution(bundle_id))
     }
 
     pub fn monitor_paginated(env: Env, start_id: u64, limit: u64) -> Vec<ExecutableTask> {
@@ -10572,3 +10735,6 @@ mod test_combinations;
 
 #[cfg(test)]
 mod test_access_control;
+
+#[cfg(test)]
+mod test_task_bundle;
