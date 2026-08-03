@@ -5,6 +5,7 @@ const cors = require('cors');
 const swaggerUi = require('swagger-ui-express');
 const { typeDefs } = require('./graphql/schema');
 const { resolvers } = require('./graphql/resolvers');
+const { createCrossChainRouter } = require('./crossChainApi');
 const { createContext, expressJwtAuth, requireRole, ROLES } = require('./graphql/auth');
 const dbHelpers = require('./graphql/db');
 const { ensureSchema, buildMerkleProofResponse } = require('./merkleStore');
@@ -45,6 +46,7 @@ function createExpressApp() {
   const app = express();
   app.use(cors());
   app.use(express.json());
+  app.use('/api/cross-chain', createCrossChainRouter());
 
   // Prometheus scrape target - mounted ahead of auth/rate-limiting so
   // infra scrapers never get throttled or challenged for a token.
