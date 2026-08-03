@@ -162,6 +162,8 @@ async function main() {
     failureThreshold: config.rpcFailoverFailureThreshold,
     cooldownMs: config.rpcFailoverCooldownMs,
     healthCheckIntervalMs: config.rpcFailoverHealthCheckIntervalMs,
+    maxHealthyLedgerLag: config.rpcFailoverMaxHealthyLedgerLag,
+    latencyPenaltyThresholdMs: config.rpcFailoverLatencyPenaltyThresholdMs,
     serverFactory: (url) => new Server(url),
   });
   if (config.rpcFailoverEnabled) {
