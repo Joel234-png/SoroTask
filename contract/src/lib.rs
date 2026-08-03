@@ -80,6 +80,10 @@ pub enum Error {
     EmptyBundle = 51,
     BundleTooLarge = 52,
     BundleStepFailed = 53,
+    BlockExecutionLimitReached = 54,
+    DecryptionFailed = 55,
+    InsufficientDelegation = 56,
+    InvalidCommissionRate = 57,
 }
 
 #[contracttype]
@@ -167,6 +171,8 @@ const MAX_ARGS_SIZE_BYTES: u32 = 4096;
 const FIXED_EXECUTION_FEE: i128 = 100;
 const MAX_DEPENDENCIES_PER_TASK: u32 = 16;
 const MAX_DEPENDENCY_DEPTH: u32 = 16;
+/// Maximum number of tasks allowed per ledger block for rate limiting
+const MAX_TASKS_PER_BLOCK: u32 = 50;
 /// Maximum number of tasks allowed in a single batch execution
 const MAX_BATCH_SIZE: u32 = 100;
 
