@@ -2,7 +2,7 @@ import React from 'react';
 import { render, screen, fireEvent } from '@testing-library/react';
 import { WalletConnectionHub } from '../WalletConnectionHub';
 import { useStellarWallet } from '../../context/StellarWalletContext';
-import { WalletNetwork } from '@stellar/wallet-kit';
+import { WalletNetwork } from '@/context/StellarWalletContext';
 
 jest.mock('../../context/StellarWalletContext');
 
