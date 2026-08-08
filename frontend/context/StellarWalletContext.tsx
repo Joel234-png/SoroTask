@@ -205,9 +205,19 @@ export const StellarWalletProvider: React.FC<{ children: ReactNode }> = ({
 export const useStellarWallet = () => {
   const context = useContext(StellarWalletContext);
   if (!context) {
-    throw new Error(
-      'useStellarWallet must be used within a StellarWalletProvider',
-    );
+    return {
+      address: null,
+      walletId: null,
+      network: WalletNetwork.TESTNET,
+      isConnected: false,
+      connectWallet: async () => {},
+      disconnectWallet: async () => {},
+      switchNetwork: () => {},
+      kit: null,
+      reconnecting: false,
+      sessionExpired: false,
+      dismissSessionExpired: () => {},
+    };
   }
   return context;
 };
