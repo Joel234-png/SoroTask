@@ -347,6 +347,12 @@ class GasMonitor {
   forecastTaskGas(taskId, gasBalance) {
     return this.forecaster.forecastTaskGas(taskId, gasBalance);
   }
+
+  getForecasterState() {
+    return {
+      priceState: this.priceTrend.getState(),
+    };
+  }
 }
 
 module.exports = { GasMonitor, percentile };
