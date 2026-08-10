@@ -237,6 +237,25 @@ export function WalletProvider({ children }: { children: React.ReactNode }) {
  * @example
  * const { session, connect, disconnect, status } = useWallet();
  */
+const DEFAULT_WALLET_CONTEXT: WalletContextValue = {
+  status: "disconnected",
+  session: null,
+  errorCode: null,
+  errorMessage: null,
+  isLoading: false,
+  isConnectModalOpen: false,
+  openConnectModal: () => {},
+  closeConnectModal: () => {},
+  connect: async () => {},
+  disconnect: () => {},
+  clearError: () => {},
+};
+
+export function useWalletOptional(): WalletContextValue {
+  const ctx = useContext(WalletContext);
+  return ctx || DEFAULT_WALLET_CONTEXT;
+}
+
 export function useWallet(): WalletContextValue {
   const ctx = useContext(WalletContext);
   if (!ctx) {

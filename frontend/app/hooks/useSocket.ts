@@ -71,6 +71,8 @@ export function useSocket(options: UseSocketOptions = {}) {
   const optionsRef = useRef(options);
   optionsRef.current = options;
 
+  const connectRef = useRef<() => Socket>();
+
   const connect = useCallback(() => {
     const socket = io(KEEPER_URL, {
       transports: ['websocket'],
@@ -99,7 +101,9 @@ export function useSocket(options: UseSocketOptions = {}) {
       setTimeout(() => {
         if (socketRef.current && !socketRef.current.connected) {
           socketRef.current.close();
-          socketRef.current = connect();
+          if (connectRef.current) {
+            socketRef.current = connectRef.current();
+          }
         }
       }, delay);
     });
@@ -126,6 +130,8 @@ export function useSocket(options: UseSocketOptions = {}) {
 
     return socket;
   }, []);
+
+  connectRef.current = connect;
 
   useEffect(() => {
     socketRef.current = connect();

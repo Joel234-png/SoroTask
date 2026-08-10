@@ -2,7 +2,7 @@ import React from 'react';
 import { render, screen, fireEvent } from '@testing-library/react';
 import { WalletConnectionHub } from '../WalletConnectionHub';
 import { useStellarWallet } from '../../context/StellarWalletContext';
-import { WalletNetwork } from '@stellar/wallet-kit';
+import { WalletNetwork } from '@/context/StellarWalletContext';
 
 jest.mock('../../context/StellarWalletContext');
 
@@ -37,7 +37,7 @@ describe('WalletConnectionHub', () => {
 
   it('renders truncated address and Disconnect button when connected', () => {
     (useStellarWallet as jest.Mock).mockReturnValue({
-      address: 'GBRPYHIL2CI3FNQ4BXLFMNDLF2C3KCJPO
+      address: 'GBRPYHIL2CI3FNQ4BXLFMNDLF2C3KCJPO',
       walletId: 'freighter',
       network: WalletNetwork.TESTNET,
       isConnected: true,

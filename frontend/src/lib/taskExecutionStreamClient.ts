@@ -66,7 +66,7 @@ export class TaskExecutionStreamClient extends EventEmitter {
 
         this.setupSocketListeners();
 
-        this.socket.on('connect', () => {
+        this.socket?.on('connect', () => {
           this.reconnectAttempts = 0;
           this.setConnectionState('connected');
           logger.info('Connected to task execution stream', {

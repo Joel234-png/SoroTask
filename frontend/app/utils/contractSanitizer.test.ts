@@ -1,4 +1,4 @@
-import { ContractCalldataSanitizer } from '../contractSanitizer';
+import { ContractCalldataSanitizer } from './contractSanitizer';
 
 describe('ContractCalldataSanitizer Unit Test Suite', () => {
     let sanitizer: ContractCalldataSanitizer;

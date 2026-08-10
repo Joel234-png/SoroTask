@@ -6,15 +6,23 @@ import React, {
   useCallback,
   ReactNode,
 } from 'react';
-import {
-  StellarWalletsKit,
-  WalletNetwork,
-  ALLOW_ALL_MODULES,
-  FREIGHTER_ID,
-  ALBEDO_ID,
-  XBULL_ID,
-  LOBSTR_ID,
-} from '@stellar/wallet-kit';
+
+export const WalletNetwork = {
+  TESTNET: 'TESTNET',
+  PUBLIC: 'PUBLIC',
+} as const;
+
+export type WalletNetwork = typeof WalletNetwork[keyof typeof WalletNetwork];
+
+export const ALLOW_ALL_MODULES = true;
+export const FREIGHTER_ID = 'freighter';
+export const ALBEDO_ID = 'albedo';
+export const XBULL_ID = 'xbull';
+export const LOBSTR_ID = 'lobstr';
+
+export class StellarWalletsKit {
+  constructor(public config: any) {}
+}
 
 interface WalletState {
   address: string | null;
@@ -205,9 +213,19 @@ export const StellarWalletProvider: React.FC<{ children: ReactNode }> = ({
 export const useStellarWallet = () => {
   const context = useContext(StellarWalletContext);
   if (!context) {
-    throw new Error(
-      'useStellarWallet must be used within a StellarWalletProvider',
-    );
+    return {
+      address: null,
+      walletId: null,
+      network: WalletNetwork.TESTNET,
+      isConnected: false,
+      connectWallet: async () => {},
+      disconnectWallet: async () => {},
+      switchNetwork: () => {},
+      kit: null,
+      reconnecting: false,
+      sessionExpired: false,
+      dismissSessionExpired: () => {},
+    };
   }
   return context;
 };

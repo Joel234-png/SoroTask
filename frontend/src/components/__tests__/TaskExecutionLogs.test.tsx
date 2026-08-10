@@ -135,18 +135,18 @@ describe('TaskExecutionLogs Component', () => {
 
   describe('Max Height', () => {
     it('should apply custom max height', () => {
-      const { container } = render(
+      render(
         <TaskExecutionLogs logs={mockLogs} maxHeight="400px" />,
       );
 
-      const logsContainer = container.querySelector('[style*="maxHeight"]');
+      const logsContainer = screen.getByTestId('logs-container');
       expect(logsContainer).toHaveStyle({ maxHeight: '400px' });
     });
 
     it('should apply default max height', () => {
-      const { container } = render(<TaskExecutionLogs logs={mockLogs} />);
+      render(<TaskExecutionLogs logs={mockLogs} />);
 
-      const logsContainer = container.querySelector('[style*="maxHeight"]');
+      const logsContainer = screen.getByTestId('logs-container');
       expect(logsContainer).toHaveStyle({ maxHeight: '600px' });
     });
   });

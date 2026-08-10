@@ -84,12 +84,16 @@ export class GasFeeOptimizer {
     const sortedByFee = [...hourlyAverages].sort((a, b) => b.average - a.average);
     const threshold = sortedByFee[0].average * 0.8;
 
+    const minFee = sortedByFee[sortedByFee.length - 1].average;
+    const maxFee = sortedByFee[0].average;
+    const midFee = (maxFee + minFee) / 2;
+
     const peakHours = sortedByFee
       .filter(h => h.average >= threshold)
       .map(h => h.hour);
 
     const lowHours = sortedByFee
-      .filter(h => h.average < threshold * 0.6)
+      .filter(h => h.average <= midFee)
       .map(h => h.hour);
 
     // Determine pattern type

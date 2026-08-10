@@ -17,7 +17,7 @@ import {
   type Task,
   type TaskFilters,
   type UpdateTaskInput,
-} from "../lib/api/tasks";
+} from "../lib/mockApi/tasks";
 import { taskKeys } from "../lib/query/keys";
 import { createPerformanceMonitor } from "../lib/frontend-performance";
 

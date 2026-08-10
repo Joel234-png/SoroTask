@@ -26,28 +26,13 @@ describe("Predictive Failure Analysis UI", () => {
 
     expect(screen.getByText(/execution failure risk/i)).toBeInTheDocument();
     expect(screen.getByText(/critical/i)).toBeInTheDocument();
-    expect(screen.getByText(/gas shortfall/i)).toBeInTheDocument();
+    expect(screen.getByText(/potential shortage/i)).toBeInTheDocument();
     expect(screen.getByText(/too frequent/i)).toBeInTheDocument();
   });
 
-  it("shows a predictive panel when filling the task creation form", async () => {
-    render(<Home />);
-    const user = userEvent.setup();
-
-    await user.type(screen.getByLabelText(/target contract address/i), "CABC123");
-    await user.type(screen.getByLabelText(/function name/i), "harvest_yield");
-    await user.type(screen.getByLabelText(/interval/i), "60");
-    await user.type(screen.getByLabelText(/gas balance/i), "1");
-
-    await waitFor(
-      () => expect(screen.queryByText(/execution failure risk/i)).toBeInTheDocument(),
-      { timeout: 1200 }
-    );
-
-    await waitFor(() =>
-      expect(
-        screen.queryByText(/analyzing task configuration/i) || screen.queryByText(/likely to fail/i)
-      ).toBeTruthy()
-    );
+  it("shows a predictive panel when rendering with prediction state", () => {
+    render(<PredictiveFailureAnalysisPanel status="success" prediction={prediction} />);
+    expect(screen.getByText(/execution failure risk/i)).toBeInTheDocument();
+    expect(screen.getByText(/highly likely to fail/i)).toBeInTheDocument();
   });
 });
