@@ -1341,7 +1341,7 @@ fn set_encrypted_payload(env: &Env, task_id: u64, payload: &EncryptedPayload) {
         .set(&DataKey::EncryptedPayload(task_id), payload);
 }
 
-fn decrypt_payload(env: &Env, payload: &EncryptedPayload) -> Result<Bytes, Error> {
+fn decrypt_payload(_env: &Env, payload: &EncryptedPayload) -> Result<Bytes, Error> {
     // In a production implementation, this would use homomorphic encryption
     // or ZK proofs to decrypt the payload in-memory without exposing the
     // plaintext on-chain. For now, we validate that the payload has the
@@ -1423,7 +1423,7 @@ fn add_keeper_delegator(env: &Env, keeper: &Address, delegator: &Address) {
 }
 
 fn remove_keeper_delegator(env: &Env, keeper: &Address, delegator: &Address) {
-    let mut delegators = get_keeper_delegators(env, keeper);
+    let delegators = get_keeper_delegators(env, keeper);
     let mut found = false;
     for i in 0..delegators.len() {
         if delegators.get(i).unwrap().clone() == delegator.clone() {
@@ -3174,14 +3174,14 @@ impl SoroTaskContract {
             Some(ref resolver_address) => {
                 let mut resolver_call_args = Vec::<Val>::new(env);
                 resolver_call_args.push_back(config.args.clone().into_val(env));
-                match env.try_invoke_contract::<bool, soroban_sdk::Error>(
-                    resolver_address,
-                    &Symbol::new(env, "check_condition"),
-                    resolver_call_args,
-                ) {
-                    Ok(Ok(true)) => true,
-                    _ => false,
-                }
+                matches!(
+                    env.try_invoke_contract::<bool, soroban_sdk::Error>(
+                        resolver_address,
+                        &Symbol::new(env, "check_condition"),
+                        resolver_call_args,
+                    ),
+                    Ok(Ok(true))
+                )
             }
             None => true,
         };
@@ -3890,7 +3890,7 @@ impl SoroTaskContract {
             .instance()
             .get(&DataKey::Token)
             .expect("Token not initialized");
-        let token_client = soroban_sdk::token::Client::new(&env, &token_address);
+        let _token_client = soroban_sdk::token::Client::new(&env, &token_address);
 
         let mut total_slashed: i128 = 0;
         let delegators_len = delegators.len();

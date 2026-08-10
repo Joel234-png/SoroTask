@@ -96,6 +96,7 @@ export const TaskExecutionLogs: React.FC<TaskExecutionLogsProps> = ({
       {/* Logs Container */}
       <div
         ref={logsContainerRef}
+        data-testid="logs-container"
         style={{ maxHeight, minHeight: '200px' }}
         className="flex-1 overflow-y-auto font-mono text-xs"
       >

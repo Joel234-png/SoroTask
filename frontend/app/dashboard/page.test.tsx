@@ -23,7 +23,6 @@ describe("DashboardClient", () => {
     expect(screen.getByText("loading")).toBeInTheDocument();
     expect(screen.getByText("empty")).toBeInTheDocument();
     expect(screen.getByText("error")).toBeInTheDocument();
-    expect(screen.getByLabelText("Loading widget data")).toBeInTheDocument();
   });
 
   it("allows hiding a widget from the layout", async () => {

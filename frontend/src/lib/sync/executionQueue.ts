@@ -153,6 +153,7 @@ export class ExecutionQueue {
       return this.toViewAction(identical, priority);
     }
 
+    this.queue.setOnline(online);
     this.queue.enqueue(type, payload);
 
     if (online) {
@@ -191,9 +192,20 @@ export class ExecutionQueue {
   }
 
   getActions(): readonly QueuedSyncAction[] {
-    return this.queue
-      .getActions()
-      .map((a) => this.toViewAction(a, PRIORITY_ORDER[a.type as SyncOperationType] ?? 0))
+    const rawActions = this.queue.getActions();
+    return rawActions
+      .map((a) => {
+        const view = this.toViewAction(a, PRIORITY_ORDER[a.type as SyncOperationType] ?? 0);
+        Object.defineProperty(view, 'attempts', {
+          get: () => a.attempts,
+          set: (v) => { a.attempts = v; }
+        });
+        Object.defineProperty(view, 'status', {
+          get: () => a.status,
+          set: (v) => { a.status = v; }
+        });
+        return view;
+      })
       .sort((a, b) => {
         if (b.priority !== a.priority) return b.priority - a.priority;
         return a.enqueuedAt - b.enqueuedAt;

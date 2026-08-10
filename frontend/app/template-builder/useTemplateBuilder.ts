@@ -281,7 +281,27 @@ function makeInstanceId(): string {
 export function useTemplateBuilder() {
   const [state, dispatch] = useReducer(reducer, initialState);
 
-  const addBlock = useCallback((block: ActionBlock) => {
+  const addBlock = useCallback((input: ActionBlock | ActionDefinition) => {
+    let block: ActionBlock;
+    if ('definitionId' in input) {
+      block = input;
+    } else {
+      const def = input as ActionDefinition;
+      const args: Record<string, string> = {};
+      const isConfigured = def.inputs.filter((p) => !p.optional).length === 0;
+      block = {
+        instanceId: makeInstanceId(),
+        definitionId: def.id,
+        label: def.label,
+        category: def.category,
+        icon: def.icon,
+        contractAddress: def.defaultContractAddress ?? '',
+        functionName: def.functionName,
+        inputs: def.inputs,
+        args,
+        isConfigured,
+      };
+    }
     dispatch({ type: 'ADD_BLOCK', block });
   }, []);
 

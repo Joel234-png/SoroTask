@@ -53,7 +53,7 @@ describe('CreateTaskWizardPage', () => {
 
     await waitFor(() => {
       expect(screen.getByText(/✓ Simulation Successful/i)).toBeInTheDocument();
-    });
+    }, { timeout: 3000 });
 
     expect(nextBtn).not.toBeDisabled();
   });

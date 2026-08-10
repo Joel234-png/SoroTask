@@ -55,10 +55,10 @@ describe('TaskExecutionStreamClient', () => {
         connected: false,
       };
 
-      jest.spyOn(client as any, 'setupSocketListeners').mockImplementation(() => {});
+      const { io } = require('socket.io-client');
+      io.mockReturnValue(mockSocket);
 
-      // Mock the socket creation
-      (client as any).socket = mockSocket;
+      jest.spyOn(client as any, 'setupSocketListeners').mockImplementation(() => {});
 
       client.connect().then(() => {
         expect(client.getConnectionState()).toBe('connected');
@@ -67,22 +67,22 @@ describe('TaskExecutionStreamClient', () => {
     });
 
     it('should set connection state to connecting', async () => {
+      let connectHandler: (() => void) | undefined;
       const mockSocket = {
-        on: jest.fn(),
+        on: jest.fn((event, handler) => {
+          if (event === 'connect') connectHandler = handler;
+        }),
         emit: jest.fn(),
         disconnect: jest.fn(),
         connected: false,
       };
 
-      (client as any).socket = mockSocket;
+      const { io } = require('socket.io-client');
+      io.mockReturnValue(mockSocket);
 
-      // Start connection attempt
-      const connectPromise = client.connect().catch(() => {
-        // Expected to fail, we just want to test state
-      });
-
+      const connectPromise = client.connect();
       expect(client.getConnectionState()).toBe('connecting');
-
+      if (connectHandler) connectHandler();
       await connectPromise;
     });
 
@@ -247,6 +247,17 @@ describe('TaskExecutionStreamClient', () => {
   });
 
   describe('Task Execution State', () => {
+    beforeEach(() => {
+      const mockSocket = {
+        on: jest.fn(),
+        emit: jest.fn(),
+        disconnect: jest.fn(),
+        connected: true,
+      };
+      (client as any).socket = mockSocket;
+      (client as any).connectionState = 'connected';
+    });
+
     it('should reconstruct execution state from events', () => {
       client.subscribe({ taskId: 'task-123' });
 
@@ -288,6 +299,17 @@ describe('TaskExecutionStreamClient', () => {
   });
 
   describe('Log Retrieval', () => {
+    beforeEach(() => {
+      const mockSocket = {
+        on: jest.fn(),
+        emit: jest.fn(),
+        disconnect: jest.fn(),
+        connected: true,
+      };
+      (client as any).socket = mockSocket;
+      (client as any).connectionState = 'connected';
+    });
+
     it('should get task logs', () => {
       client.subscribe({ taskId: 'task-123' });
 

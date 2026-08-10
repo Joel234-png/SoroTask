@@ -112,7 +112,7 @@ class ResourceMonitor {
   _measureEventLoopLag() {
     return new Promise((resolve) => {
       const start = process.hrtime.bigint();
-      setImmediate(() => {
+      global.setImmediate(() => {
         const deltaNs = process.hrtime.bigint() - start;
         resolve(Number(deltaNs) / 1e6); // ns → ms
       });

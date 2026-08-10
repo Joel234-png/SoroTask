@@ -41,19 +41,20 @@ export function createGasFeeError(
 
   if (error instanceof Error) {
     originalError = error;
-    errorMessage = error.message;
+    errorMessage = message || error.message;
 
+    const msgLower = error.message.toLowerCase();
     // Check for specific error types
-    if (error.message.includes('timeout') || error.message.includes('ECONNABORTED')) {
+    if (msgLower.includes('timeout') || error.message.includes('ECONNABORTED')) {
       type = GasFeeErrorType.TIMEOUT_ERROR;
       retriable = true;
-    } else if (error.message.includes('network') || error.message.includes('ENOTFOUND')) {
+    } else if (msgLower.includes('network') || error.message.includes('ENOTFOUND')) {
       type = GasFeeErrorType.NETWORK_ERROR;
       retriable = true;
-    } else if (error.message.includes('insufficient data') || error.message.includes('no historical')) {
+    } else if (msgLower.includes('insufficient') || msgLower.includes('historical')) {
       type = GasFeeErrorType.INSUFFICIENT_DATA;
       retriable = false;
-    } else if (error.message.includes('validation') || error.message.includes('invalid')) {
+    } else if (msgLower.includes('validation') || msgLower.includes('invalid')) {
       type = GasFeeErrorType.VALIDATION_ERROR;
       retriable = false;
     }
@@ -64,10 +65,10 @@ export function createGasFeeError(
     statusCode = context.responseStatus;
 
     if (context.responseStatus === 401 || context.responseStatus === 403) {
-      type = GasFeeErrorType.API_ERROR;
+      type = GasFeeErrorType.UNAUTHORIZED_ERROR;
       retriable = false;
     } else if (context.responseStatus === 404) {
-      type = GasFeeErrorType.API_ERROR;
+      type = GasFeeErrorType.NOT_FOUND_ERROR;
       retriable = false;
     } else if (context.responseStatus >= 500) {
       type = GasFeeErrorType.API_ERROR;

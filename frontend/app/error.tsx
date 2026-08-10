@@ -1,7 +1,7 @@
 "use client";
 
 import { useEffect } from "react";
-import * as Sentry from "@/src/lib/errors/sentry";
+import Link from "next/link";
 
 interface Props {
   error: Error & { digest?: string };
@@ -50,12 +50,12 @@ export default function GlobalError({ error, reset }: Props) {
           >
             Try again
           </button>
-          <a
+          <Link
             href="/"
             className="px-4 py-2 rounded-md bg-neutral-800 hover:bg-neutral-700 text-neutral-300 text-sm font-medium transition-colors"
           >
             Go home
-          </a>
+          </Link>
         </div>
       </div>
     </div>

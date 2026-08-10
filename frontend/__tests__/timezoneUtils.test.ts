@@ -55,7 +55,7 @@ describe('timezoneUtils', () => {
 
   describe('formatDateWithTimezone', () => {
     it('should format date with timezone info', () => {
-      const date = new Date(2024, 0, 15);
+      const date = new Date(Date.UTC(2024, 0, 15, 12, 0, 0));
       const result = formatDateWithTimezone(date, {
         timezone: 'America/New_York',
         locale: 'en-US',
