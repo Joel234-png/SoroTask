@@ -84,6 +84,7 @@ pub enum Error {
     DecryptionFailed = 55,
     InsufficientDelegation = 56,
     InvalidCommissionRate = 57,
+    InvalidVdfProof = 58,
 }
 
 #[contracttype]
@@ -791,6 +792,23 @@ pub struct ZkRangeProof {
 
 #[contracttype]
 #[derive(Clone, Debug)]
+/// A VDF proof for a Wesolowski-style time-lock delay (Issue #837).
+/// SCAFFOLD: verify_vdf_proof below is a stub (always returns false) until
+/// the group arithmetic (RSA/class-group modexp + Fiat-Shamir challenge,
+/// wasm32-compatible bignum) is implemented. Do not treat as a working
+/// security gate yet.
+pub struct VdfProof {
+    pub task_id: u64,
+    pub input: Bytes,
+    pub output: Bytes,
+    pub proof: Bytes,
+    pub difficulty: u64,
+    pub is_verified: bool,
+    pub created_at: u64,
+}
+
+#[contracttype]
+#[derive(Clone, Debug)]
 pub struct DynamicBountyConfig {
     pub enabled: bool,
     pub base_bounty: i128,
@@ -941,6 +959,8 @@ pub enum DataKey {
     KeeperRandomSeed,
     InsuranceVaultBalance,
     InsuranceTargetReserve,
+    VdfProofCounter,
+    VdfProofs(u64),
     /// Per-block execution counter for rate limiting (Issue #831)
     BlockExecutionCount,
     /// Last ledger sequence number tracked for rate limiting

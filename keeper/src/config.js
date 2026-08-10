@@ -59,6 +59,8 @@ function loadConfig() {
     rpcFailoverFailureThreshold: parseInteger(process.env.RPC_FAILOVER_FAILURE_THRESHOLD, 3),
     rpcFailoverCooldownMs: parseInteger(process.env.RPC_FAILOVER_COOLDOWN_MS, 30000),
     rpcFailoverHealthCheckIntervalMs: parseInteger(process.env.RPC_FAILOVER_HEALTH_CHECK_INTERVAL_MS, 15000),
+    rpcFailoverMaxHealthyLedgerLag: parseInteger(process.env.RPC_FAILOVER_MAX_HEALTHY_LEDGER_LAG, 3),
+    rpcFailoverLatencyPenaltyThresholdMs: parseInteger(process.env.RPC_FAILOVER_LATENCY_PENALTY_THRESHOLD_MS, 1000),
     networkPassphrase: process.env.NETWORK_PASSPHRASE,
     keeperSecret: process.env.KEEPER_SECRET,
     contractId: process.env.CONTRACT_ID,
@@ -172,7 +174,7 @@ function loadConfig() {
     // Inbound Webhooks
     inboundWebhooks: {
       enabled: parseBoolean(process.env.INBOUND_WEBHOOKS_ENABLED, false),
-      path: process.env.INBOUND_WEBHOOK_PATH || '/webhooks/task-executions',
+      path: process.env.INBOUND_WEBHOOK_PATH || '/webhook/trigger',
       secret: process.env.INBOUND_WEBHOOK_SECRETS || null,
       defaultKeyId: process.env.INBOUND_WEBHOOK_DEFAULT_KEY_ID || 'primary',
       toleranceMs: parseInteger(process.env.INBOUND_WEBHOOK_TOLERANCE_MS, 300000),
