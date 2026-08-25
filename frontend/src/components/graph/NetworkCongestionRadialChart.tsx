@@ -115,7 +115,12 @@ const RadialChartCore: React.FC<Props> = ({ dataSourceUrl = '/api/congestion', r
             .attr('stroke', 'white')
             .style('stroke-width', '2px')
             .style('opacity', 0.8);
-            
+
+        return () => {
+            if (svgRef.current) {
+                d3.select(svgRef.current).selectAll('*').interrupt().remove();
+            }
+        };
     }, [data]);
 
     if (loading) return <div className="animate-pulse flex space-x-4">Loading pipeline data...</div>;
