@@ -43,7 +43,13 @@ export function useOptimisticTxReconciler({
   );
 
   const reconcile = useCallback(
-    (confirmations: TransactionConfirmation[]) => {
+    (
+      confirmations: TransactionConfirmation[],
+      callbacks?: {
+        onConfirmed?: (tx: OptimisticTransaction) => void;
+        onFailed?: (tx: OptimisticTransaction) => void;
+      },
+    ) => {
       setTransactions((current) => {
         const result = reconcileOptimisticTransactions({
           transactions: current,
@@ -54,6 +60,15 @@ export function useOptimisticTxReconciler({
 
         if (result.auditEvents.length > 0) {
           setAuditEvents((existing) => [...result.auditEvents, ...existing].slice(0, 100));
+
+          // Trigger callbacks for confirmed or rolled_back transactions
+          result.transactions.forEach((tx) => {
+            if (tx.state === "confirmed") {
+              callbacks?.onConfirmed?.(tx);
+            } else if (tx.state === "rolled_back" || tx.state === "conflict") {
+              callbacks?.onFailed?.(tx);
+            }
+          });
         }
 
         return result.transactions;

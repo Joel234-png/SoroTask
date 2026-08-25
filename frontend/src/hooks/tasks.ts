@@ -154,3 +154,32 @@ export function useDeleteTask(
     },
   });
 }
+
+// Cache invalidation helpers for on-chain confirmation -------------------
+
+export async function invalidateTaskCache(
+  queryClient: ReturnType<typeof useQueryClient>,
+  taskId?: string,
+  userAddress?: string,
+) {
+  await Promise.all([
+    queryClient.invalidateQueries({ queryKey: taskKeys.lists() }),
+    queryClient.invalidateQueries({ queryKey: taskKeys.all }),
+    taskId
+      ? queryClient.invalidateQueries({ queryKey: taskKeys.detail(taskId) })
+      : Promise.resolve(),
+    userAddress
+      ? queryClient.invalidateQueries({ queryKey: ["tasks", userAddress] })
+      : Promise.resolve(),
+    taskId
+      ? queryClient.invalidateQueries({ queryKey: ["task", taskId] })
+      : Promise.resolve(),
+  ]);
+}
+
+export function useInvalidateTaskOnConfirmation() {
+  const queryClient = useQueryClient();
+  return (taskId?: string, userAddress?: string) =>
+    invalidateTaskCache(queryClient, taskId, userAddress);
+}
+
