@@ -2,6 +2,7 @@ const crypto = require('crypto');
 const fs = require('fs');
 const path = require('path');
 const { hashTaskCondition, isValidZkProof, zeroizeBuffer } = require('./lib/helpers');
+const { withEphemeralDir, writeFile } = require('./lib/ephemeralDir');
 const EventEmitter = require('events');
 
 // ---------------------------------------------------------------------------
@@ -382,11 +383,13 @@ class ZKProofService extends EventEmitter {
 
   /**
    * Enqueues an asynchronous proof generation job.
+   * Uses ephemeral directories to isolate proof artifacts and ensure cleanup.
    * @param {Object} taskCondition
    * @param {Object} clientData
+   * @param {Object} [options]
    * @returns {Object} Job info containing jobId, status, createdAt.
    */
-  enqueueAsyncJob(taskCondition, clientData) {
+  enqueueAsyncJob(taskCondition, clientData, options = {}) {
     if (!this.isReady) {
       throw new Error('Service not initialized');
     }
@@ -403,33 +406,39 @@ class ZKProofService extends EventEmitter {
 
     this.asyncJobs.set(jobId, job);
 
-    // Asynchronously process proof generation
+    // Asynchronously process proof generation within an ephemeral directory
     setImmediate(async () => {
       try {
         job.status = 'processing';
         job.progress = 25;
         this.emit('jobProgress', { jobId, status: job.status, progress: job.progress });
 
-        job.progress = 50;
-        this.emit('jobProgress', { jobId, status: job.status, progress: job.progress });
+        // Use ephemeral directory for proof generation to ensure temp files are cleaned up
+        await withEphemeralDir(async (ephemeralDir) => {
+          await writeFile(ephemeralDir, 'witness.json', JSON.stringify(clientData));
+          await writeFile(ephemeralDir, 'taskCondition.json', JSON.stringify(taskCondition));
 
-        const rawProof = await this.generateProof(taskCondition, clientData);
-        const conditionHash = hashTaskCondition(taskCondition);
+          job.progress = 50;
+          this.emit('jobProgress', { jobId, status: job.status, progress: job.progress });
 
-        job.progress = 100;
-        job.status = 'completed';
-        job.result = {
-          proofId: rawProof.proofId,
-          status: 'success',
-          conditionHash,
-          proof: {
-            pi_a: rawProof.pi_a,
-            pi_b: rawProof.pi_b,
-            pi_c: rawProof.pi_c,
-            publicSignals: rawProof.publicSignals,
-          },
-          generatedAt: new Date().toISOString(),
-        };
+          const rawProof = await this.generateProof(taskCondition, clientData);
+          const conditionHash = hashTaskCondition(taskCondition);
+
+          job.progress = 100;
+          job.status = 'completed';
+          job.result = {
+            proofId: rawProof.proofId,
+            status: 'success',
+            conditionHash,
+            proof: {
+              pi_a: rawProof.pi_a,
+              pi_b: rawProof.pi_b,
+              pi_c: rawProof.pi_c,
+              publicSignals: rawProof.publicSignals,
+            },
+            generatedAt: new Date().toISOString(),
+          };
+        });
 
         this.emit('jobComplete', job);
       } catch (err) {
