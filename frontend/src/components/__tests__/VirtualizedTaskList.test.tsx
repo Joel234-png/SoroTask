@@ -116,13 +116,10 @@ describe("VirtualizedTaskList", () => {
     );
 
     const list = screen.getByTestId("task-list-scroll");
-    fireEvent.scroll(list, {
-      target: {
-        scrollTop: 540,
-        scrollHeight: 1000,
-        clientHeight: 420,
-      },
-    });
+    Object.defineProperty(list, 'scrollTop', { value: 540, writable: true });
+    Object.defineProperty(list, 'scrollHeight', { value: 1000, writable: true });
+    Object.defineProperty(list, 'clientHeight', { value: 420, writable: true });
+    fireEvent.scroll(list);
 
     expect(onLoadMore).toHaveBeenCalledTimes(1);
   });

@@ -24,6 +24,12 @@ jest.mock('@/src/lib/errors/tracking', () => ({
   captureSentryException: jest.fn(),
 }));
 
+jest.mock('@/src/lib/errors', () => ({
+  captureSentryException: jest.fn((...args: any[]) => {
+    require('@/src/lib/errors/tracking').captureSentryException(...args);
+  }),
+}));
+
 describe('useWebAuthn hook', () => {
   beforeEach(() => {
     jest.clearAllMocks();

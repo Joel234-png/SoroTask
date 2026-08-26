@@ -1,14 +1,20 @@
 const express = require('express');
 const { ApolloServer } = require('apollo-server-express');
+const { makeExecutableSchema } = require('@graphql-tools/schema');
 const cors = require('cors');
+const swaggerUi = require('swagger-ui-express');
 const { typeDefs } = require('./graphql/schema');
 const { resolvers } = require('./graphql/resolvers');
-const { createContext } = require('./graphql/auth');
+const { createCrossChainRouter } = require('./crossChainApi');
+const { createContext, expressJwtAuth, requireRole, ROLES } = require('./graphql/auth');
 const dbHelpers = require('./graphql/db');
 const { ensureSchema, buildMerkleProofResponse } = require('./merkleStore');
 const { metricsHandler } = require('./metrics');
 const { createRateLimiter } = require('./rateLimiter');
 const { traceContextMiddleware } = require('../../scripts/traceContext');
+const { openApiSpec } = require('./openapi');
+
+const DEFAULT_PORT = 4000;
 
 /**
  * Register REST routes that live alongside the GraphQL endpoint.
@@ -27,7 +33,7 @@ function registerRestRoutes(app, deps = dbHelpers) {
   // Health and protected endpoint routes for REST API
   app.get('/api/health', (req, res) => {
     const context = createContext({ req });
-    res.json({ status: 'ok', user: context.user });
+    res.json({ status: 'ok', timestamp: new Date().toISOString(), user: context.user });
   });
 
   app.get('/api/protected', (req, res) => {
@@ -56,6 +62,21 @@ function registerRestRoutes(app, deps = dbHelpers) {
     }
   });
 
+  // Issue #825: query cold-storage archives
+  app.get('/events/archived', requireRole(ROLES.USER), async (req, res) => {
+    if (!req.query.contractId) {
+      return res.status(400).json({ error: 'contractId query parameter is required' });
+    }
+    try {
+      const { queryArchivedEvents } = require('./archivalQuery');
+      const limit = Number(req.query.limit) || 100;
+      const rows = await queryArchivedEvents(req.query.contractId, limit);
+      return res.json({ events: rows });
+    } catch (err) {
+      return res.status(500).json({ error: err.message });
+    }
+  });
+
   return app;
 }
 
@@ -63,33 +84,70 @@ function createExpressApp() {
   const app = express();
   app.use(cors());
   app.use(express.json());
+  app.use('/api/cross-chain', createCrossChainRouter());
+
+  // Prometheus scrape target - mounted ahead of auth/rate-limiting
+  app.get('/metrics', metricsHandler);
 
   registerRestRoutes(app);
 
-  return app;
-}
+  app.use(expressJwtAuth);
 
-async function startApiServer(port = 4000) {
-  const app = createExpressApp();
-  await ensureSchema(dbHelpers);
+  app.get('/api-docs.json', (req, res) => res.json(openApiSpec));
+  if (openApiSpec) {
+    app.use('/api-docs', swaggerUi.serve, swaggerUi.setup(openApiSpec));
+  }
+
+  ensureSchema(dbHelpers).catch((err) => {
+    console.error('Failed to ensure merkle schema:', err);
+  });
+
+  const schema = makeExecutableSchema({ typeDefs, resolvers });
+  app.locals.graphqlSchema = schema;
 
   const server = new ApolloServer({
-    typeDefs,
-    resolvers,
+    schema,
     context: createContext,
     introspection: true,
   });
 
-  await server.start();
-  server.applyMiddleware({ app, path: '/graphql' });
+  app.locals.graphqlReady = server
+    .start()
+    .then(() =>
+      server.applyMiddleware({ app, path: '/graphql', bodyParserConfig: false }),
+    )
+    .catch((err) => {
+      console.error('Failed to start Apollo Server:', err);
+    });
 
+  return app;
+}
+
+/**
+ * Boots the Express app, starts listening, and attaches the GraphQL subscriptions transport.
+ */
+function startApiServer(port = DEFAULT_PORT) {
+  const app = createExpressApp();
   return new Promise((resolve) => {
     const httpServer = app.listen(port, () => {
-      console.log(`GraphQL API ready at http://localhost:${port}${server.graphqlPath}`);
+      const { SubscriptionServer } = require('subscriptions-transport-ws');
+      const { execute, subscribe } = require('graphql');
+      SubscriptionServer.create(
+        {
+          schema: app.locals.graphqlSchema,
+          execute,
+          subscribe,
+          onConnect: () => ({ user: { role: ROLES.ANONYMOUS } }),
+        },
+        { server: httpServer, path: '/graphql' },
+      );
+
+      console.log(`GraphQL API ready at http://localhost:${port}/graphql`);
+      console.log(`GraphQL subscriptions ready at ws://localhost:${port}/graphql`);
       console.log(`Prometheus Metrics ready at http://localhost:${port}/metrics`);
       resolve(httpServer);
     });
   });
 }
 
-module.exports = { createExpressApp, startApiServer, registerRestRoutes };
+module.exports = { startApiServer, createExpressApp, registerRestRoutes };

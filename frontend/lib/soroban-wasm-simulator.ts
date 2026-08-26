@@ -141,7 +141,7 @@ export class SorobanWasmSimulator {
     options: SimulationOptions = {}
   ): Promise<SimulationResult> {
     try {
-      const tx = transaction.build();
+      const tx = typeof (transaction as any).build === 'function' ? transaction.build() : transaction;
       const simulation = await this.rpc.simulateTransaction(tx);
       
       if (!rpc.Api.isSimulationSuccess(simulation)) {
@@ -212,7 +212,7 @@ export class SorobanWasmSimulator {
     const warnings: string[] = [];
     
     try {
-      const tx = transaction.build();
+      const tx = typeof (transaction as any).build === 'function' ? transaction.build() : transaction;
       const simulation = await this.rpc.simulateTransaction(tx);
       
       if (!rpc.Api.isSimulationSuccess(simulation)) {

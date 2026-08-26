@@ -1,4 +1,4 @@
-import { WasmCryptoOffloader, FallbackJsEngine } from '../wasmOffloader';
+import { WasmCryptoOffloader, FallbackJsEngine } from './wasmOffloader';
 
 describe('WasmCryptoOffloader Core Framework Tests', () => {
     let offloader: WasmCryptoOffloader;

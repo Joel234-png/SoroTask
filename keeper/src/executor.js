@@ -182,7 +182,7 @@ function normalizeSubmissionError(error, fallbackCode, correlationId) {
 
 async function executeTaskOnce(
   taskId,
-  { server, keypair, account, contractId, networkPassphrase, correlationId, logger: customLogger, dueTime, metricsServer, config },
+  { server, keypair, account, contractId, networkPassphrase, correlationId, logger: customLogger, dueTime, metricsServer, config, hsmSigner },
 ) {
   const taskLogger = customLogger || logger;
   const contract = new Contract(contractId);
@@ -218,7 +218,12 @@ async function executeTaskOnce(
   }
 
   const preparedTx = SorobanRpc.assembleTransaction(tx, simResult).build();
-  preparedTx.sign(keypair);
+
+  if (hsmSigner) {
+    await hsmSigner.signTransaction(preparedTx);
+  } else {
+    preparedTx.sign(keypair);
+  }
 
   // Compute execution lateness before submitting (requirement 3.1, 3.2)
   const latenessSeconds = (dueTime != null && Number.isFinite(Number(dueTime)))
@@ -337,7 +342,7 @@ async function executeTaskOnce(
  */
 async function executeTask(
   taskId,
-  { server, keypair, account, contractId, networkPassphrase, correlationId, dueTime, metricsServer, config },
+  { server, keypair, account, contractId, networkPassphrase, correlationId, dueTime, metricsServer, config, hsmSigner },
 ) {
   /** @type {{taskId, txHash: string|null, status: string, feePaid: number, error: string|null, ledger: number|null, closeTime: number|null}} */
   const taskLogger = correlationId ? logger.childWithTrace(correlationId) : logger;
@@ -365,6 +370,7 @@ async function executeTask(
       dueTime,
       metricsServer,
       config,
+      hsmSigner,
     });
     result.txHash = executionResult.txHash;
     result.status = executionResult.status;
@@ -423,6 +429,7 @@ async function executeTaskWithRetry(taskId, deps, options = {}) {
         account: freshAccount,
         correlationId,
         logger: executionLogger,
+        hsmSigner: deps.hsmSigner,
       });
     },
     {

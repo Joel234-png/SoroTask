@@ -45,6 +45,8 @@ describe("SyncManager", () => {
 
   it("enqueues an action and flushes when online", async () => {
     const { manager, handlers } = buildManager();
+    // Simulate network online event
+    (manager as any).handleNetworkChange({ online: true, quality: "excellent", lastPingMs: 10 });
     manager.start();
     const action = manager.enqueue("task.execute", {
       taskId: "t1",
@@ -60,6 +62,11 @@ describe("SyncManager", () => {
 
   it("pauses flushing when offline", async () => {
     const { manager, handlers } = buildManager();
+    jest.spyOn((manager as any).network, "getHealth").mockReturnValue({
+      online: false,
+      quality: "offline",
+      lastPingMs: null,
+    });
     manager.start();
     const action = manager.enqueue("task.execute", {
       taskId: "t1",
@@ -81,6 +88,7 @@ describe("SyncManager", () => {
   });
 
   it("exposes a singleton", () => {
+    buildManager();
     const a = getSyncManager();
     expect(a).not.toBeNull();
   });

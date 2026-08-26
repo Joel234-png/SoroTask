@@ -59,6 +59,8 @@ function loadConfig() {
     rpcFailoverFailureThreshold: parseInteger(process.env.RPC_FAILOVER_FAILURE_THRESHOLD, 3),
     rpcFailoverCooldownMs: parseInteger(process.env.RPC_FAILOVER_COOLDOWN_MS, 30000),
     rpcFailoverHealthCheckIntervalMs: parseInteger(process.env.RPC_FAILOVER_HEALTH_CHECK_INTERVAL_MS, 15000),
+    rpcFailoverMaxHealthyLedgerLag: parseInteger(process.env.RPC_FAILOVER_MAX_HEALTHY_LEDGER_LAG, 3),
+    rpcFailoverLatencyPenaltyThresholdMs: parseInteger(process.env.RPC_FAILOVER_LATENCY_PENALTY_THRESHOLD_MS, 1000),
     networkPassphrase: process.env.NETWORK_PASSPHRASE,
     keeperSecret: process.env.KEEPER_SECRET,
     contractId: process.env.CONTRACT_ID,
@@ -132,6 +134,8 @@ function loadConfig() {
       stalePeerMs: parseInteger(process.env.P2P_STALE_PEER_MS, 45000),
       authWindowMs: parseInteger(process.env.P2P_AUTH_WINDOW_MS, 30000),
       connectTimeoutMs: parseInteger(process.env.P2P_CONNECT_TIMEOUT_MS, 5000),
+      transport: process.env.P2P_TRANSPORT || 'socketio',
+      taskLockTtlMs: parseInteger(process.env.P2P_TASK_LOCK_TTL_MS, 60000),
     },
     // RPC Load Balancer Configuration
     rpcEndpoints: process.env.RPC_ENDPOINTS || null,
@@ -170,7 +174,7 @@ function loadConfig() {
     // Inbound Webhooks
     inboundWebhooks: {
       enabled: parseBoolean(process.env.INBOUND_WEBHOOKS_ENABLED, false),
-      path: process.env.INBOUND_WEBHOOK_PATH || '/webhooks/task-executions',
+      path: process.env.INBOUND_WEBHOOK_PATH || '/webhook/trigger',
       secret: process.env.INBOUND_WEBHOOK_SECRETS || null,
       defaultKeyId: process.env.INBOUND_WEBHOOK_DEFAULT_KEY_ID || 'primary',
       toleranceMs: parseInteger(process.env.INBOUND_WEBHOOK_TOLERANCE_MS, 300000),

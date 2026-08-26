@@ -103,7 +103,7 @@ export class ContractCalldataSanitizer {
      */
     private detectInjectionPatterns(input: string): boolean {
         // Look for typical cross-boundary escape characters or XDR layout injections
-        const hyperSpecialPatterns = [/[<>]/, /\\x[0-9a-fA-F]{2}/, /__proto__/, /constructor/];
+        const hyperSpecialPatterns = [/[<>]/, /\\x[0-9a-fA-F]{2}/];
         return hyperSpecialPatterns.some((regex) => regex.test(input));
     }
 
@@ -124,8 +124,9 @@ export class ContractCalldataSanitizer {
             return node.map((item) => this.normalizeNodes(item));
         }
         if (typeof node === 'object' && node !== null) {
-            const normalizedObj: Record<string, any> = {};
+            const normalizedObj: Record<string, any> = Object.create(null);
             for (const [key, value] of Object.entries(node)) {
+                if (key === '__proto__' || key === 'constructor') continue;
                 // Ensure field mappings stay bounded
                 const secureKey = key.replace(/[^a-zA-Z0-9_]/g, '');
                 normalizedObj[secureKey] = this.normalizeNodes(value);

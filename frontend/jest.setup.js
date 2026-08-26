@@ -1,6 +1,12 @@
 require('@testing-library/jest-dom')
 const React = require('react')
 
+if (typeof global.TextEncoder === 'undefined') {
+  const { TextEncoder, TextDecoder } = require('util')
+  global.TextEncoder = TextEncoder
+  global.TextDecoder = TextDecoder
+}
+
 // jsdom doesn't expose structuredClone, which fake-indexeddb relies on.
 if (typeof global.structuredClone !== 'function') {
   global.structuredClone = (value) => JSON.parse(JSON.stringify(value))
@@ -24,6 +30,14 @@ if (typeof global.fetch !== 'function') {
     })
   )
 }
+
+// Mock next-auth/react
+jest.mock('next-auth/react', () => ({
+  SessionProvider: ({ children }) => children,
+  useSession: () => ({ data: null, status: 'unauthenticated' }),
+  signIn: jest.fn(),
+  signOut: jest.fn(),
+}))
 
 // Mock environment variables for tests
 process.env.NEXT_PUBLIC_API_URL = 'http://localhost:3000'
@@ -66,6 +80,31 @@ beforeAll(() => {
 afterAll(() => {
   console.warn = originalWarn
 })
+
+// Mock Next.js navigation (App Router)
+jest.mock('next/navigation', () => ({
+  useRouter() {
+    return {
+      push: jest.fn(),
+      replace: jest.fn(),
+      refresh: jest.fn(),
+      back: jest.fn(),
+      forward: jest.fn(),
+      prefetch: jest.fn(),
+    }
+  },
+  usePathname() {
+    return '/'
+  },
+  useSearchParams() {
+    return new URLSearchParams()
+  },
+  useParams() {
+    return {}
+  },
+  redirect: jest.fn(),
+  notFound: jest.fn(),
+}))
 
 // Mock Next.js router
 jest.mock('next/router', () => ({

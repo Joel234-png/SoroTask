@@ -64,6 +64,6 @@ describe('GasMonitor', () => {
       p90_base_fee: '200',
     });
     expect(simulation.congestionFactor).toBe(2);
-    expect(simulation.recommendedPriorityFee).toBeGreaterThanOrEqual(100);
+    expect(simulation.priorityFee).toBeGreaterThanOrEqual(100);
   });
 });

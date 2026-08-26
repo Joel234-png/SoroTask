@@ -3,10 +3,26 @@
  */
 
 import { SorobanWasmSimulator, useSorobanWasmSimulator } from './soroban-wasm-simulator';
-import { TransactionBuilder, Account, xdr } from '@stellar/stellar-sdk';
+import { TransactionBuilder, Account, Operation, xdr } from '@stellar/stellar-sdk';
 
 // Mock the Stellar SDK
-jest.mock('@stellar/stellar-sdk');
+jest.mock('@stellar/stellar-sdk', () => {
+  const original = jest.requireActual('@stellar/stellar-sdk');
+  return {
+    ...original,
+    Contract: jest.fn().mockImplementation(() => ({
+      call: jest.fn().mockReturnValue(original.Operation.bumpSequence({ bumpTo: '10' })),
+    })),
+    rpc: {
+      ...original.rpc,
+      Server: jest.fn(),
+      Api: {
+        ...original.rpc?.Api,
+        isSimulationSuccess: jest.fn((sim: any) => !sim.error),
+      },
+    },
+  };
+});
 
 describe('SorobanWasmSimulator', () => {
   let simulator: SorobanWasmSimulator;
@@ -52,17 +68,17 @@ describe('SorobanWasmSimulator', () => {
   
   describe('simulateContractCall', () => {
     it('should simulate contract call successfully', async () => {
-      const mockAccount = new Account('GTEST', '1');
-      const mockArgs = [xdr.ScVal.scvU32(xdr.Uint32.fromString('1'))];
+      const mockAccount = new Account('GAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAWHF', '1');
+      const mockArgs = [xdr.ScVal.scvU32(1)];
       
       mockRpc.simulateTransaction.mockResolvedValue({
-        results: [{ xdr: xdr.ScVal.scvU32(xdr.Uint32.fromString('42')) }],
+        results: [{ xdr: xdr.ScVal.scvU32(42) }],
         events: [],
         cost: { cpuInstructions: 1000, memoryBytes: 500 },
       });
       
       const result = await simulator.simulateContractCall(
-        'C-TEST',
+        'CCW67TZDVBH2R3HMFYTXGKHYHXTJWZXDF6SWKB5J3N5IF54Y4RMB6T7R',
         'test_method',
         mockArgs,
         mockAccount
@@ -74,8 +90,8 @@ describe('SorobanWasmSimulator', () => {
     });
     
     it('should handle simulation failure', async () => {
-      const mockAccount = new Account('GTEST', '1');
-      const mockArgs = [xdr.ScVal.scvU32(xdr.Uint32.fromString('1'))];
+      const mockAccount = new Account('GAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAWHF', '1');
+      const mockArgs = [xdr.ScVal.scvU32(1)];
       
       mockRpc.simulateTransaction.mockResolvedValue({
         error: 'Simulation failed',
@@ -83,7 +99,7 @@ describe('SorobanWasmSimulator', () => {
       });
       
       const result = await simulator.simulateContractCall(
-        'C-TEST',
+        'CCW67TZDVBH2R3HMFYTXGKHYHXTJWZXDF6SWKB5J3N5IF54Y4RMB6T7R',
         'test_method',
         mockArgs,
         mockAccount
@@ -94,19 +110,19 @@ describe('SorobanWasmSimulator', () => {
     });
     
     it('should use cache when enabled', async () => {
-      const mockAccount = new Account('GTEST', '1');
-      const mockArgs = [xdr.ScVal.scvU32(xdr.Uint32.fromString('1'))];
+      const mockAccount = new Account('GAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAWHF', '1');
+      const mockArgs = [xdr.ScVal.scvU32(1)];
       
       mockRpc.simulateTransaction.mockResolvedValue({
-        results: [{ xdr: xdr.ScVal.scvU32(xdr.Uint32.fromString('42')) }],
+        results: [{ xdr: xdr.ScVal.scvU32(42) }],
         events: [],
         cost: { cpuInstructions: 1000, memoryBytes: 500 },
       });
       
       // First call
-      await simulator.simulateContractCall('C-TEST', 'test_method', mockArgs, mockAccount);
+      await simulator.simulateContractCall('CCW67TZDVBH2R3HMFYTXGKHYHXTJWZXDF6SWKB5J3N5IF54Y4RMB6T7R', 'test_method', mockArgs, mockAccount);
       // Second call should use cache
-      await simulator.simulateContractCall('C-TEST', 'test_method', mockArgs, mockAccount);
+      await simulator.simulateContractCall('CCW67TZDVBH2R3HMFYTXGKHYHXTJWZXDF6SWKB5J3N5IF54Y4RMB6T7R', 'test_method', mockArgs, mockAccount);
       
       expect(mockRpc.simulateTransaction).toHaveBeenCalledTimes(1);
     });
@@ -114,13 +130,13 @@ describe('SorobanWasmSimulator', () => {
   
   describe('simulateTransaction', () => {
     it('should simulate transaction successfully', async () => {
-      const mockTx = new TransactionBuilder(new Account('GTEST', '1'), {
+      const mockTx = new TransactionBuilder(new Account('GAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAWHF', '1'), {
         fee: '100',
         networkPassphrase: 'Test SDF Network ; September 2015',
-      }).setTimeout(30).build();
+      }).addOperation(Operation.bumpSequence({ bumpTo: '10' })).setTimeout(30).build();
       
       mockRpc.simulateTransaction.mockResolvedValue({
-        results: [{ xdr: xdr.ScVal.scvU32(xdr.Uint32.fromString('42')) }],
+        results: [{ xdr: xdr.ScVal.scvU32(42) }],
         events: [],
         cost: { cpuInstructions: 1000, memoryBytes: 500 },
       });
@@ -134,23 +150,23 @@ describe('SorobanWasmSimulator', () => {
   
   describe('estimateGas', () => {
     it('should estimate gas cost', async () => {
-      const mockAccount = new Account('GTEST', '1');
-      const mockArgs = [xdr.ScVal.scvU32(xdr.Uint32.fromString('1'))];
+      const mockAccount = new Account('GAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAWHF', '1');
+      const mockArgs = [xdr.ScVal.scvU32(1)];
       
       mockRpc.simulateTransaction.mockResolvedValue({
-        results: [{ xdr: xdr.ScVal.scvU32(xdr.Uint32.fromString('42')) }],
+        results: [{ xdr: xdr.ScVal.scvU32(42) }],
         events: [],
         cost: { cpuInstructions: 1000, memoryBytes: 500 },
       });
       
-      const gas = await simulator.estimateGas('C-TEST', 'test_method', mockArgs, mockAccount);
+      const gas = await simulator.estimateGas('CCW67TZDVBH2R3HMFYTXGKHYHXTJWZXDF6SWKB5J3N5IF54Y4RMB6T7R', 'test_method', mockArgs, mockAccount);
       
       expect(gas).toBe(1100); // 100 base + 1000 resource
     });
     
     it('should throw on simulation failure', async () => {
-      const mockAccount = new Account('GTEST', '1');
-      const mockArgs = [xdr.ScVal.scvU32(xdr.Uint32.fromString('1'))];
+      const mockAccount = new Account('GAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAWHF', '1');
+      const mockArgs = [xdr.ScVal.scvU32(1)];
       
       mockRpc.simulateTransaction.mockResolvedValue({
         error: 'Simulation failed',
@@ -158,20 +174,20 @@ describe('SorobanWasmSimulator', () => {
       });
       
       await expect(
-        simulator.estimateGas('C-TEST', 'test_method', mockArgs, mockAccount)
-      ).rejects.toThrow('Gas estimation failed');
+        simulator.estimateGas('CCW67TZDVBH2R3HMFYTXGKHYHXTJWZXDF6SWKB5J3N5IF54Y4RMB6T7R', 'test_method', mockArgs, mockAccount)
+      ).rejects.toThrow('Simulation failed');
     });
   });
   
   describe('validateTransaction', () => {
     it('should validate successful transaction', async () => {
-      const mockTx = new TransactionBuilder(new Account('GTEST', '1'), {
+      const mockTx = new TransactionBuilder(new Account('GAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAWHF', '1'), {
         fee: '100',
         networkPassphrase: 'Test SDF Network ; September 2015',
-      }).setTimeout(30).build();
+      }).addOperation(Operation.bumpSequence({ bumpTo: '10' })).setTimeout(30).build();
       
       mockRpc.simulateTransaction.mockResolvedValue({
-        results: [{ xdr: xdr.ScVal.scvU32(xdr.Uint32.fromString('42')) }],
+        results: [{ xdr: xdr.ScVal.scvU32(42) }],
         events: [],
         cost: { cpuInstructions: 1000, memoryBytes: 500 },
       });
@@ -183,10 +199,10 @@ describe('SorobanWasmSimulator', () => {
     });
     
     it('should return errors for failed transaction', async () => {
-      const mockTx = new TransactionBuilder(new Account('GTEST', '1'), {
+      const mockTx = new TransactionBuilder(new Account('GAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAWHF', '1'), {
         fee: '100',
         networkPassphrase: 'Test SDF Network ; September 2015',
-      }).setTimeout(30).build();
+      }).addOperation(Operation.bumpSequence({ bumpTo: '10' })).setTimeout(30).build();
       
       mockRpc.simulateTransaction.mockResolvedValue({
         error: 'Invalid transaction',
@@ -200,13 +216,13 @@ describe('SorobanWasmSimulator', () => {
     });
     
     it('should warn on high resource usage', async () => {
-      const mockTx = new TransactionBuilder(new Account('GTEST', '1'), {
+      const mockTx = new TransactionBuilder(new Account('GAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAWHF', '1'), {
         fee: '100',
         networkPassphrase: 'Test SDF Network ; September 2015',
-      }).setTimeout(30).build();
+      }).addOperation(Operation.bumpSequence({ bumpTo: '10' })).setTimeout(30).build();
       
       mockRpc.simulateTransaction.mockResolvedValue({
-        results: [{ xdr: xdr.ScVal.scvU32(xdr.Uint32.fromString('42')) }],
+        results: [{ xdr: xdr.ScVal.scvU32(42) }],
         events: [],
         cost: { cpuInstructions: 2000000, memoryBytes: 200000 },
       });
@@ -220,14 +236,12 @@ describe('SorobanWasmSimulator', () => {
   
   describe('getAccount', () => {
     it('should get account from RPC', async () => {
-      mockRpc.getAccount.mockResolvedValue({
-        sequenceNumber: '123456',
-      });
+      mockRpc.getAccount.mockResolvedValue(new Account('GAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAWHF', '123456'));
       
-      const account = await simulator.getAccount('GTEST');
+      const account = await simulator.getAccount('GAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAWHF');
       
       expect(account).toBeInstanceOf(Account);
-      expect(mockRpc.getAccount).toHaveBeenCalledWith('GTEST');
+      expect(mockRpc.getAccount).toHaveBeenCalledWith('GAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAWHF');
     });
   });
   

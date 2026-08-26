@@ -99,7 +99,9 @@ export class SyncManager {
     this.startTs = Date.now();
     this.setStatus("paused");
     logger.info("Sync manager started");
-    void this.flush();
+    if (this.network.getHealth().online) {
+      void this.flush();
+    }
   }
 
   stop(): void {
@@ -216,13 +218,18 @@ export class SyncManager {
   }
 
   private handleNetworkChange = (health: NetworkHealth): void => {
+    const onlineChanged = this.state.network.online !== health.online;
     this.state.network = health;
+    this.queue.setOnline(health.online);
+    this.refresh();
     this.recordEvent("network_changed");
     this.notify();
 
-    if (health.online && this.state.status === "paused") {
+    if (health.online && onlineChanged) {
       logger.info("Network restored - resuming sync");
       void this.flush();
+    } else if (!health.online) {
+      this.setStatus("paused");
     }
   };
 

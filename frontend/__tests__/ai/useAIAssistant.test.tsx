@@ -10,7 +10,14 @@ import * as aiClient from '@/src/lib/ai/openai-client';
 jest.mock('@/src/lib/ai/openai-client', () => ({
   getAIClient: jest.fn(),
   resetAIClient: jest.fn(),
-  AIServiceError: Error,
+  AIServiceError: class AIServiceError extends Error {
+    code: string;
+    constructor(message: string, code: string) {
+      super(message);
+      this.code = code;
+      this.name = 'AIServiceError';
+    }
+  },
 }));
 
 describe('useAIAssistant', () => {
@@ -109,9 +116,13 @@ describe('useAIAssistant', () => {
 
       const { result } = renderHook(() => useAIAssistant());
 
+      let promise: Promise<void>;
+      act(() => {
+        promise = result.current.sendMessage('Test');
+      });
+      expect(result.current.isLoading).toBe(true);
+
       await act(async () => {
-        const promise = result.current.sendMessage('Test');
-        expect(result.current.isLoading).toBe(true);
         await promise;
       });
 

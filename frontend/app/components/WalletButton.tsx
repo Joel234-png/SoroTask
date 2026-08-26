@@ -7,11 +7,12 @@
  * state in the nav; full connect/error/disconnect flows live in the modal.
  */
 
-import { useWallet } from "@/app/context/WalletContext";
+import { useWallet, useWalletOptional } from "@/app/context/WalletContext";
 import { truncateAddress } from "@/app/lib/wallet";
 
 export function WalletButton() {
-  const { status, session, errorCode, isLoading, openConnectModal } = useWallet();
+  const wallet = useWalletOptional();
+  const { status, session, errorCode, isLoading, openConnectModal } = wallet;
 
   if (status === "idle" || status === "restoring") {
     return (

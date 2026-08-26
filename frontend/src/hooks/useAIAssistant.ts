@@ -71,6 +71,8 @@ export function useAIAssistant(): UseAIAssistantState & UseAIAssistantActions {
         return;
       }
 
+      if (isLoading) return;
+
       setIsLoading(true);
       clearError();
 
@@ -90,7 +92,7 @@ export function useAIAssistant(): UseAIAssistantState & UseAIAssistantActions {
         setIsLoading(false);
       }
     },
-    [clearError]
+    [clearError, isLoading]
   );
 
   const generateTaskConfig = useCallback(

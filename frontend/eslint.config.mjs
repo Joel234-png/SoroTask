@@ -6,7 +6,7 @@ const stripReactRules = (config) => ({
   ...config,
   rules: Object.fromEntries(
     Object.entries(config.rules ?? {}).filter(
-      ([ruleName]) => !ruleName.startsWith("react/"),
+      ([ruleName]) => !ruleName.startsWith("react/") && !ruleName.startsWith("react-hooks/"),
     ),
   ),
 });
@@ -25,7 +25,7 @@ const eslintConfig = defineConfig([
       "prefer-const": "warn",
       "react-hooks/set-state-in-effect": "warn",
       "react-hooks/rules-of-hooks": "warn",
-      "react-compiler/react-compiler": "warn"
+      "react-hooks/immutability": "warn"
     }
   },
   // Override default ignores of eslint-config-next.

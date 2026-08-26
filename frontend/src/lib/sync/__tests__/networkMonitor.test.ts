@@ -56,7 +56,7 @@ describe("NetworkMonitor", () => {
 
     global.fetch = jest.fn().mockImplementation(() => {
       const delay = typeof jest.advanceTimersByTimeAsync === "function"
-        ? jest.advanceTimersByTimeAsync(100)
+        ? jest.advanceTimersByTimeAsync(50)
         : Promise.resolve();
       return delay.then(() => ({ ok: true }));
     });

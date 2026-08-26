@@ -89,16 +89,20 @@ export function createPluginLoader(config: FederationConfig = {}) {
     updateStatus(manifest.id, "loading");
 
     try {
-      const module = await loadWithRetry(
+      const pluginModule = await loadWithRetry(
         manifest.entry,
         retryAttempts,
         retryDelayMs,
         timeoutMs,
       );
 
+      const component =
+        (pluginModule as { default?: ComponentType<PluginComponentProps> })?.default ??
+        (pluginModule as ComponentType<PluginComponentProps>);
+
       const loaded: LoadedPlugin = {
         manifest,
-        component: module.default,
+        component,
         status: "ready",
         loadedAt: new Date().toISOString(),
       };

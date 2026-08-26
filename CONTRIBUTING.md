@@ -99,7 +99,10 @@ To run against a PostgreSQL database instead of SQLite, apply the migrations fir
 
 ```bash
 psql -U <user> -d <database> -f indexer/migrations/001_initial_schema.sql
+psql -U <user> -d <database> -f indexer/migrations/002_timescaledb_raw_events_retention.sql
 ```
+
+The second migration requires [TimescaleDB](https://docs.timescale.com/) (PostgreSQL extension). It converts the raw `events` table into the `raw_events` hypertable (7-day chunks, compression after 14 days) and keeps a backwards-compatible `events` view for reads.
 
 ---
 

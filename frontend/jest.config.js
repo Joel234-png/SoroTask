@@ -48,7 +48,15 @@ const customConfig = {
   moduleNameMapper: {
     '^@/(.*)$': '<rootDir>/$1',
   },
-  transformIgnorePatterns: ['/node_modules/(?!(@noble|@stellar)/)'],
+  transformIgnorePatterns: ['/node_modules/(?!.*(@noble|@stellar|@scure|next-auth))'],
 };
 
-module.exports = createJestConfig(customConfig);
+module.exports = async () => {
+  const config = await createJestConfig(customConfig)();
+  return {
+    ...config,
+    transformIgnorePatterns: [
+      '/node_modules/(?!(@noble|@stellar|@scure|next-auth|uint8array-extras|openai)/)',
+    ],
+  };
+};

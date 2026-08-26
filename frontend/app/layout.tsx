@@ -5,9 +5,7 @@ import { AppProviders } from "@/app/components/AppProviders";
 import { AIAssistantProvider } from "@/components/AIAssistant";
 import { ClientInit } from "./ClientInit";
 import { ErrorBoundary } from "@sentry/nextjs";
-import { NextIntlClientProvider } from "next-intl";
 import { ThemeProvider } from "next-themes";
-import enMessages from "@/i18n/translations/en.json";
 
 function GlobalErrorFallback({ error, resetError }: any) {
   return (
@@ -50,16 +48,14 @@ export default function RootLayout({
     <html lang="en" suppressHydrationWarning>
       <body className="antialiased">
         <ErrorBoundary fallback={GlobalErrorFallback}>
-          <NextIntlClientProvider messages={enMessages} locale="en">
-            <ThemeProvider attribute="data-theme" defaultTheme="system" enableSystem>
-              <AIAssistantProvider>
-                <AppProviders>
-                  <CommandPalette />
-                  {children}
-                </AppProviders>
-              </AIAssistantProvider>
-            </ThemeProvider>
-          </NextIntlClientProvider>
+          <ThemeProvider attribute="data-theme" defaultTheme="system" enableSystem>
+            <AIAssistantProvider>
+              <AppProviders>
+                <CommandPalette />
+                {children}
+              </AppProviders>
+            </AIAssistantProvider>
+          </ThemeProvider>
         </ErrorBoundary>
         {/* Initialize Sentry and fetch instrumentation on client */}
         <ClientInit />

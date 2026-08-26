@@ -13,7 +13,14 @@ import {
 // Mock OpenAI API
 jest.mock('openai', () => {
   return {
-    default: jest.fn(),
+    __esModule: true,
+    default: jest.fn().mockImplementation(() => ({
+      chat: {
+        completions: {
+          create: jest.fn(),
+        },
+      },
+    })),
   };
 });
 
