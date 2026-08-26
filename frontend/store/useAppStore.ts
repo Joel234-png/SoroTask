@@ -5,7 +5,8 @@ export interface Task {
   target: string;
   functionName: string;
   interval: number;
-  gasBalance: number;
+  /** Gas balance in stroops. Keep contract token amounts as BigInt. */
+  gasBalance: bigint;
 }
 
 export interface Log {

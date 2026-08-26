@@ -1,4 +1,5 @@
 const http = require('http');
+const fs = require('fs');
 const promClient = require('prom-client');
 const { Server } = require('socket.io');
 const { requireAdminAuth } = require('./auth');
@@ -134,18 +135,6 @@ class Metrics {
   }
 }
 
-  reset() {
-    tasksExecutedTotal: 0,
-      tasksFailedTotal: 0,
-        throttledRequestsTotal: 0,
-    };
-    this.gauges = {
-  avgFeePaidXlm: 0,
-  lastCycleDurationMs: 0,
-  rpcCircuitState: 0,
-};
-this.feeSamples = [];
-  }
 function createDefaultGasMonitor() {
   return {
     getLowGasCount: () => 0,
@@ -169,7 +158,7 @@ class MetricsServer {
     this.gasMonitor = gasMonitor || createDefaultGasMonitor();
     this.logger = logger || createLogger('metrics');
     this.deadLetterQueue = deadLetterQueue || null;
-    this.port = options.port || parseInt(process.env.METRICS_PORT, 10) || 3000;
+    this.port = options.port ?? (parseInt(process.env.METRICS_PORT, 10) || 3000);
     this.healthStaleThreshold = options.healthStaleThreshold
       || parseInt(process.env.HEALTH_STALE_THRESHOLD_MS || '60000', 10);
     this.server = null;
@@ -178,6 +167,11 @@ class MetricsServer {
     this.controlStateProvider = options.controlStateProvider || null;
     this.controlActionHandler = options.controlActionHandler || null;
     this.historyManager = options.historyManager || null;
+    this.redisClient = options.redisClient || null;
+    this.workerPool = options.workerPool || null;
+    this.tmpPath = options.tmpPath || '/tmp';
+    this.redisLatencyThresholdMs = options.redisLatencyThresholdMs
+      || parseInt(process.env.REDIS_LATENCY_THRESHOLD_MS || '250', 10);
     this.register = new promClient.Registry();
     this.initPrometheusMetrics();
   }
@@ -192,6 +186,11 @@ class MetricsServer {
 
   setControlActionHandler(handler) {
     this.controlActionHandler = handler;
+  }
+
+  setReadinessProviders({ redisClient, workerPool } = {}) {
+    if (redisClient) this.redisClient = redisClient;
+    if (workerPool) this.workerPool = workerPool;
   }
 
   initPrometheusMetrics() {
@@ -417,16 +416,12 @@ class MetricsServer {
   }
 
   start() {
-    this.server = http.createServer((req, res) => {
-      // CORS headers for initial development
-      const protect = (handler) => {
-        return () => requireAdminAuth(req, res, handler);
-      };
     if (this.server) {
       return;
     }
 
     this.server = http.createServer(async (req, res) => {
+      const protect = (handler) => () => requireAdminAuth(req, res, handler);
       res.setHeader('Access-Control-Allow-Origin', '*');
       res.setHeader('Access-Control-Allow-Methods', 'GET, POST, OPTIONS');
       res.setHeader('Access-Control-Allow-Headers', 'Content-Type, Authorization');
@@ -438,8 +433,11 @@ class MetricsServer {
       }
 
       const url = new URL(req.url, `http://127.0.0.1:${this.port}`);
-      if (url.pathname === '/health' || url.pathname === '/health/') {
-        this.handleHealth(res);
+      if (url.pathname === '/healthz' || url.pathname === '/healthz/') {
+        this.handleLiveness(res);
+
+      } else if (url.pathname === '/readyz' || url.pathname === '/readyz/' || url.pathname === '/health' || url.pathname === '/health/') {
+        await this.handleReadiness(res);
 
       } else if (req.url === '/metrics' || req.url === '/metrics/') {
         this.handleMetrics(res);
@@ -506,6 +504,75 @@ class MetricsServer {
       'Content-Type': 'application/json',
     });
     res.end(JSON.stringify(healthData, null, 2));
+  }
+
+  handleLiveness(res) {
+    const status = this.metrics.getHealthStatus(this.healthStaleThreshold);
+    const healthy = status.status !== 'stale';
+    res.writeHead(healthy ? 200 : 503, { 'Content-Type': 'application/json' });
+    res.end(JSON.stringify({
+      status: healthy ? 'ok' : 'degraded',
+      uptime: status.uptime,
+      lastPollAt: status.lastPollAt,
+    }));
+  }
+
+  async handleReadiness(res) {
+    const checks = {
+      redis: await this.checkRedis(),
+      workers: this.checkWorkers(),
+      tmpDisk: this.checkTmpDisk(),
+    };
+    const healthy = Object.values(checks).every((check) => check.healthy);
+    res.writeHead(healthy ? 200 : 503, { 'Content-Type': 'application/json' });
+    res.end(JSON.stringify({
+      status: healthy ? 'ready' : 'degraded',
+      checks,
+    }, null, 2));
+  }
+
+  checkWorkers() {
+    if (!this.workerPool || typeof this.workerPool.getReadinessStatus !== 'function') {
+      return { healthy: false, reason: 'worker_pool_unavailable' };
+    }
+    return this.workerPool.getReadinessStatus();
+  }
+
+  async checkRedis() {
+    if (!this.redisClient || typeof this.redisClient.ping !== 'function') {
+      return { healthy: false, reason: 'redis_unavailable' };
+    }
+    const startedAt = Date.now();
+    try {
+      const response = await this.redisClient.ping();
+      const latencyMs = Date.now() - startedAt;
+      const healthy = response === 'PONG' && latencyMs <= this.redisLatencyThresholdMs;
+      return {
+        healthy,
+        connected: response === 'PONG',
+        latencyMs,
+        ...(latencyMs > this.redisLatencyThresholdMs ? { reason: 'queue_latency_high' } : {}),
+        ...(this.redisClient.isLocalFallback ? { localFallback: true } : {}),
+      };
+    } catch (error) {
+      return { healthy: false, connected: false, reason: 'redis_ping_failed', error: error.message };
+    }
+  }
+
+  checkTmpDisk() {
+    const minimumBytes = 2 * 1024 * 1024 * 1024;
+    try {
+      const stats = fs.statfsSync(this.tmpPath);
+      const availableBytes = Number(stats.bavail) * Number(stats.bsize);
+      return {
+        healthy: availableBytes > minimumBytes,
+        availableBytes,
+        minimumBytes,
+        path: this.tmpPath,
+      };
+    } catch (error) {
+      return { healthy: false, reason: 'tmp_disk_check_failed', error: error.message, path: this.tmpPath };
+    }
   }
 
   handleMetrics(res) {

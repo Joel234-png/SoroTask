@@ -325,6 +325,20 @@ class ExecutionQueue extends EventEmitter {
     };
   }
 
+  getReadinessStatus() {
+    const limiterStats = typeof this.limit.getStats === 'function' ? this.limit.getStats() : {};
+    const queued = typeof limiterStats.queueDepth === 'number' ? limiterStats.queueDepth : this.depth;
+    const exhausted = this.inFlight >= this.concurrencyLimit || queued > 0;
+    return {
+      healthy: !this.shuttingDown && !exhausted,
+      capacity: this.concurrencyLimit,
+      inFlight: this.inFlight,
+      queued,
+      available: Math.max(this.concurrencyLimit - this.inFlight, 0),
+      shuttingDown: this.shuttingDown,
+    };
+  }
+
   async shutdown() {
     this.shuttingDown = true;
     this.logger.info('Shutting down execution queue');

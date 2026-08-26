@@ -17,6 +17,7 @@ const { normalizeShardConfig, filterTasksForShard } = require("./src/sharding");
 const { StartupValidator } = require("./src/validator");
 const { GracefulShutdownManager } = require("./src/gracefulShutdown");
 const { createDefaultFilterChain } = require("./src/taskFilter");
+const { getRedisClient } = require("./src/lock");
 
 // Create root logger for the main module
 const logger = createLogger("keeper");
@@ -95,8 +96,6 @@ async function main() {
     ownedTasks: 0,
     skippedTasks: 0,
   });
-  metricsServer.start();
-
   // Perform startup validation to fail fast on configuration errors
   const validator = new StartupValidator(
     server,
@@ -142,6 +141,11 @@ async function main() {
   const queue = new ExecutionQueue(undefined, metricsServer, { idempotencyGuard });
   const queueLogger = createLogger("queue");
   await queue.initialize();
+  metricsServer.setReadinessProviders({
+    redisClient: getRedisClient(),
+    workerPool: queue,
+  });
+  metricsServer.start();
 
   queue.on("task:started", (taskId, context) =>
     queueLogger.info("Started execution", {
