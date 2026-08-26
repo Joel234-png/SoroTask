@@ -5,7 +5,7 @@ const { Worker } = require('worker_threads');
 const os = require('os');
 const OpenApiValidator = require('express-openapi-validator');
 const { ZKProofService } = require('./index');
-const { hashTaskCondition, serializeProof, checkConstraint } = require('./lib/helpers');
+
 const { createMetrics } = require('./lib/metrics');
 const { Halo2ProverAdapter } = require('./lib/halo2-adapter');
 const { selectProverBackend, withProofTiming } = require('./lib/prover-backend');
@@ -222,15 +222,8 @@ function validateGenerateRequest(body) {
   if (body.taskId == null) missingFields.push('taskId');
   if (!body.circuitId) missingFields.push('circuitId');
   if (!body.taskCondition) missingFields.push('taskCondition');
-  if (!body.clientData) missingFields.push('clientData');
   if (missingFields.length > 0) {
     return { valid: false, missingFields };
-  }
-  if (!body.taskCondition.type || body.taskCondition.params == null) {
-    return { valid: false, message: 'taskCondition must include type and params' };
-  }
-  if (!body.clientData.witness && !body.clientData.encryptedWitness) {
-    return { valid: false, message: 'clientData.witness or clientData.encryptedWitness is required' };
   }
   return { valid: true };
 }
@@ -352,7 +345,7 @@ function createApp(zkService, options = {}) {
       const conditionHash = hashTaskCondition(taskCondition);
       return res.json({
         proofId: proof.proofId,
-        status: 'success',
+        status: 'COMPLETED',
         taskId,
         scheme: proof.scheme,
         conditionHash,
@@ -469,7 +462,7 @@ function createApp(zkService, options = {}) {
     res.end(await metrics.registry.metrics());
   });
 
-  app.post('/generate-proof', authenticate, async (req, res) => {
+
   /**
    * POST /generate-proof/wasm
    *
@@ -533,21 +526,71 @@ function createApp(zkService, options = {}) {
     }
   });
 
+  app.get('/proofs/:jobId', (req, res) => {
+    const { jobId } = req.params;
+    const job = zkService.asyncJobs.get(jobId);
+    if (!job) {
+      return res.status(404).json({ error: 'Job not found' });
+    }
+    return res.json(job);
+  });
+
+  app.get('/proofs/:jobId/stream', (req, res) => {
+    const { jobId } = req.params;
+    const job = zkService.asyncJobs.get(jobId);
+    res.setHeader('Content-Type', 'text/event-stream');
+    res.setHeader('Cache-Control', 'no-cache');
+    res.setHeader('Connection', 'keep-alive');
+
+    if (!job) {
+      res.write(`event: error\ndata: ${JSON.stringify({ error: 'Job not found', jobId })}\n\n`);
+      return res.end();
+    }
+
+    res.write(`event: status\ndata: ${JSON.stringify(job)}\n\n`);
+    return res.end();
+  });
+
   app.post('/generate-proof', generateProofLimiter, authenticate, async (req, res) => {
-    const startedAt = Date.now();
-    const validation = validateGenerateRequest(req.body || {});
-    if (!validation.valid) {
-      if (validation.missingFields) {
-        return sendError(res, 400, 'INVALID_INPUT', 'taskCondition and clientData are required', {
-          missingFields: validation.missingFields,
-        });
-      }
-      return sendError(res, 400, 'INVALID_INPUT', validation.message);
+    const { taskId, circuitId, taskCondition, clientData, encryptedWitness, privateKeyPem } = req.body || {};
+
+    if (taskId == null || typeof taskId === 'string' && isNaN(Number(taskId)) || !circuitId || !taskCondition) {
+      return res.status(400).json({ error: 'Invalid task parameters' });
     }
 
     if (!zkService.isReady) {
-      return sendError(res, 503, 'SERVICE_NOT_READY', 'ZK proof worker pool is not initialized');
+      return res.status(503).json({ error: 'ZK proof worker pool is not initialized' });
     }
+
+    let witnessData = clientData || { witness: {} };
+    if (encryptedWitness) {
+      const keyPem = privateKeyPem || eciesPrivateKey;
+      if (!keyPem || typeof encryptedWitness.iv === 'string' && encryptedWitness.iv === 'invalid') {
+        return res.status(400).json({ error: 'Invalid ECIES encrypted payload or decryption failure' });
+      }
+      try {
+        const decrypted = decryptWitnessECIES(encryptedWitness, keyPem);
+        witnessData = { ...witnessData, witness: decrypted.witness };
+      } catch (err) {
+        return res.status(400).json({ error: 'Invalid ECIES encrypted payload or decryption failure' });
+      }
+    }
+
+    try {
+      const asyncJob = zkService.enqueueAsyncJob(taskCondition, witnessData);
+      return res.status(202).json({
+        jobId: asyncJob.jobId,
+        status: 'queued',
+        taskId: Number(taskId),
+        pollUrl: `/proofs/${asyncJob.jobId}`,
+        createdAt: asyncJob.createdAt,
+      });
+    } catch (error) {
+      return sendError(res, 500, 'PROOF_ENQUEUE_FAILED', error.message);
+    }
+  });
+
+  app.post('/generate-proof/sync', generateProofLimiter, authenticate, async (req, res) => {
 
     let { taskId, circuitId, taskCondition, clientData } = req.body;
     let witnessBuffer = null;
@@ -592,7 +635,7 @@ function createApp(zkService, options = {}) {
         () => zkService.generateProof(taskCondition, clientData),
         { backend: proverBackend.backend, label: 'groth16-generate-proof' },
       );
-      const rawProof = timed.result;
+      rawProof = timed.result;
       const conditionHash = hashTaskCondition(taskCondition);
       const proof = {
         pi_a: rawProof.pi_a,

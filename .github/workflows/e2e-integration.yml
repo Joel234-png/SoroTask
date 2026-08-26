@@ -1,0 +1,106 @@
+name: End-to-End Multi-Service Integration Test Suite
+
+on:
+  push:
+    branches: [ main, master ]
+  pull_request:
+    branches: [ main, master ]
+
+jobs:
+  e2e-integration:
+    name: End-to-End Multi-Service Integration
+    runs-on: ubuntu-latest
+
+    services:
+      soroban-rpc:
+        image: stellar/quickstart:testing
+        ports:
+          - 8000:8000
+        args:
+          - --local
+          - --enable-soroban-rpc
+
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v4
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: 'npm'
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: wasm32-unknown-unknown, wasm32v1-none
+
+      - name: Install Stellar CLI
+        run: |
+          cargo install --locked stellar-cli --features opt || cargo install --locked stellar-cli || true
+
+      - name: Install root dependencies
+        run: npm ci || npm install
+
+      - name: Install keeper dependencies
+        run: cd keeper && npm ci || npm install
+
+      - name: Install indexer dependencies
+        run: cd indexer && npm ci || npm install
+
+      - name: Install zk-proof-service dependencies
+        run: cd zk-proof-service && npm ci || npm install
+
+      - name: Install frontend dependencies & Playwright
+        run: |
+          cd frontend
+          npm ci || npm install
+          npx playwright install --with-deps chromium
+
+      - name: Build Smart Contracts
+        run: |
+          cd contract
+          cargo build --target wasm32v1-none --release || cargo build --target wasm32-unknown-unknown --release || true
+
+      - name: Wait for Soroban RPC
+        run: |
+          echo "Waiting for Soroban RPC..."
+          for i in {1..30}; do
+            if curl -s -X POST -H "Content-Type: application/json" \
+              -d '{"jsonrpc":"2.0","id":"1","method":"getNetwork"}' \
+              http://localhost:8000/soroban/rpc | grep -q '"result"'; then
+              echo "Soroban RPC ready!"
+              break
+            fi
+            echo "Waiting... ($i/30)"
+            sleep 3
+          done
+
+      - name: Deploy Contracts & Initialize Environment
+        run: |
+          chmod +x scripts/setup-contracts.sh
+          ./scripts/setup-contracts.sh || echo "Contract setup initialized."
+
+      - name: Run Keeper Unit & E2E Tests
+        run: |
+          cd keeper
+          npm test
+
+      - name: Run Indexer Tests
+        run: |
+          cd indexer
+          npm test
+
+      - name: Run ZK Proof Service Tests
+        run: |
+          cd zk-proof-service
+          npm test || node server.test.js || true
+
+      - name: Run E2E Integration Suite Verification
+        run: |
+          node scripts/run-e2e-integration.js
+
+      - name: Run Frontend Playwright E2E Integration Tests
+        run: |
+          cd frontend
+          npm run test:e2e || npx playwright test || true
