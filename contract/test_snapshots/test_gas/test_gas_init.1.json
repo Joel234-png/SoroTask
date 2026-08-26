@@ -6,6 +6,7 @@
   },
   "auth": [
     [],
+    [],
     [
       [
         "GAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAGO6V",
@@ -28,7 +29,7 @@
     []
   ],
   "ledger": {
-    "protocol_version": 25,
+    "protocol_version": 26,
     "sequence_number": 0,
     "timestamp": 0,
     "network_id": "0000000000000000000000000000000000000000000000000000000000000000",
@@ -93,6 +94,18 @@
                     "wasm": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
                   },
                   "storage": [
+                    {
+                      "key": {
+                        "vec": [
+                          {
+                            "symbol": "ProtocolFeeBps"
+                          }
+                        ]
+                      },
+                      "val": {
+                        "u32": 0
+                      }
+                    },
                     {
                       "key": {
                         "vec": [

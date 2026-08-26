@@ -19,6 +19,9 @@ import {
   type UpdateTaskInput,
 } from "../lib/mockApi/tasks";
 import { taskKeys } from "../lib/query/keys";
+import { createPerformanceMonitor } from "../lib/frontend-performance";
+
+const monitor = createPerformanceMonitor({ route: "/tasks" });
 
 // Read hooks ----------------------------------------------------------
 //
@@ -88,11 +91,11 @@ export function useUpdateTask(
     Task,
     Error,
     UpdateTaskInput,
-    { previous?: Task }
+    { previous?: Task; finishPerf?: ReturnType<typeof monitor.start> }
   >,
 ) {
   const queryClient = useQueryClient();
-  return useMutation<Task, Error, UpdateTaskInput, { previous?: Task }>({
+  return useMutation<Task, Error, UpdateTaskInput, { previous?: Task; finishPerf?: ReturnType<typeof monitor.start> }>({
     mutationFn: updateTask,
     ...options,
     // Optimistic update: write the new value into the cache before the
@@ -101,6 +104,7 @@ export function useUpdateTask(
     // the mutation's onMutate result, write the new value, return that
     // snapshot so onError can restore it.
     onMutate: async (input, context) => {
+      const finishPerf = monitor.start("task_mutation");
       await queryClient.cancelQueries({
         queryKey: taskKeys.detail(input.id),
       });
@@ -115,7 +119,7 @@ export function useUpdateTask(
         });
       }
       void options?.onMutate?.(input, context);
-      return { previous };
+      return { previous, finishPerf };
     },
     onError: (err, input, onMutateResult, context) => {
       if (onMutateResult?.previous) {
@@ -124,11 +128,13 @@ export function useUpdateTask(
           onMutateResult.previous,
         );
       }
+      onMutateResult?.finishPerf?.();
       options?.onError?.(err, input, onMutateResult, context);
     },
     onSuccess: (data, variables, onMutateResult, context) => {
       queryClient.setQueryData(taskKeys.detail(data.id), data);
       void queryClient.invalidateQueries({ queryKey: taskKeys.lists() });
+      onMutateResult?.finishPerf?.();
       options?.onSuccess?.(data, variables, onMutateResult, context);
     },
   });
@@ -148,3 +154,32 @@ export function useDeleteTask(
     },
   });
 }
+
+// Cache invalidation helpers for on-chain confirmation -------------------
+
+export async function invalidateTaskCache(
+  queryClient: ReturnType<typeof useQueryClient>,
+  taskId?: string,
+  userAddress?: string,
+) {
+  await Promise.all([
+    queryClient.invalidateQueries({ queryKey: taskKeys.lists() }),
+    queryClient.invalidateQueries({ queryKey: taskKeys.all }),
+    taskId
+      ? queryClient.invalidateQueries({ queryKey: taskKeys.detail(taskId) })
+      : Promise.resolve(),
+    userAddress
+      ? queryClient.invalidateQueries({ queryKey: ["tasks", userAddress] })
+      : Promise.resolve(),
+    taskId
+      ? queryClient.invalidateQueries({ queryKey: ["task", taskId] })
+      : Promise.resolve(),
+  ]);
+}
+
+export function useInvalidateTaskOnConfirmation() {
+  const queryClient = useQueryClient();
+  return (taskId?: string, userAddress?: string) =>
+    invalidateTaskCache(queryClient, taskId, userAddress);
+}
+

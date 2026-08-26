@@ -6,6 +6,7 @@
   },
   "auth": [
     [],
+    [],
     [
       [
         "GAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAGO6V",
@@ -105,7 +106,7 @@
                         "symbol": "interval"
                       },
                       "val": {
-                        "u64": "3600"
+                        "u32": 3600
                       }
                     },
                     {
@@ -122,6 +123,14 @@
                       },
                       "val": {
                         "u64": "0"
+                      }
+                    },
+                    {
+                      "key": {
+                        "symbol": "permissions"
+                      },
+                      "val": {
+                        "u32": 15
                       }
                     },
                     {
@@ -145,6 +154,12 @@
                       "val": {
                         "vec": []
                       }
+                    },
+                    {
+                      "key": {
+                        "symbol": "yield_strategy"
+                      },
+                      "val": "void"
                     }
                   ]
                 }
@@ -222,7 +237,7 @@
     ]
   ],
   "ledger": {
-    "protocol_version": 25,
+    "protocol_version": 26,
     "sequence_number": 0,
     "timestamp": 0,
     "network_id": "0000000000000000000000000000000000000000000000000000000000000000",
@@ -335,6 +350,18 @@
                     "wasm": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
                   },
                   "storage": [
+                    {
+                      "key": {
+                        "vec": [
+                          {
+                            "symbol": "ProtocolFeeBps"
+                          }
+                        ]
+                      },
+                      "val": {
+                        "u32": 0
+                      }
+                    },
                     {
                       "key": {
                         "vec": [

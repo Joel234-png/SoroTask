@@ -187,7 +187,10 @@ export const uniqueEmail = async (email: string): Promise<ValidationResult> => {
 export const validContract = async (address: string): Promise<ValidationResult> => {
   // Mock async validation - in real app, this would verify contract exists
   await new Promise(resolve => setTimeout(resolve, 1000));
-  const validContracts = ['C1234567890ABCDEF1234567890ABCDEF12345678', 'C9876543210FEDCBA9876543210FEDCBA98765432'];
+  const validContracts = [
+    'CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA',
+    'CBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB',
+  ];
   return {
     isValid: validContracts.includes(address),
     message: validContracts.includes(address) ? undefined : 'Contract not found or invalid'

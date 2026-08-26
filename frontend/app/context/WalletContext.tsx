@@ -53,6 +53,12 @@ export type WalletContextValue = {
   errorMessage: string | null;
   /** True while any async wallet operation is in progress */
   isLoading: boolean;
+  /** Whether the wallet connection modal is open */
+  isConnectModalOpen: boolean;
+  /** Open the wallet connection modal */
+  openConnectModal: () => void;
+  /** Close the wallet connection modal */
+  closeConnectModal: () => void;
   /** Trigger wallet connection (shows Freighter popup) */
   connect: () => Promise<void>;
   /** Clear session state */
@@ -108,8 +114,12 @@ export function WalletProvider({ children }: { children: React.ReactNode }) {
   const [session, setSession] = useState<WalletSession | null>(null);
   const [errorCode, setErrorCode] = useState<WalletError | null>(null);
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
+  const [isConnectModalOpen, setIsConnectModalOpen] = useState(false);
 
   const isLoading = status === "restoring" || status === "connecting";
+
+  const openConnectModal = useCallback(() => setIsConnectModalOpen(true), []);
+  const closeConnectModal = useCallback(() => setIsConnectModalOpen(false), []);
 
   // Keep a ref to the watcher cleanup so we can stop it on unmount or disconnect
   const stopWatcherRef = useRef<(() => void) | null>(null);
@@ -198,6 +208,7 @@ export function WalletProvider({ children }: { children: React.ReactNode }) {
   // -------------------------------------------------------------------------
 
   const connect = useCallback(async () => {
+    setIsConnectModalOpen(true);
     setStatus("connecting");
     setErrorCode(null);
     setErrorMessage(null);
@@ -217,6 +228,10 @@ export function WalletProvider({ children }: { children: React.ReactNode }) {
     setErrorCode(null);
     setErrorMessage(null);
     setStatus("disconnected");
+    
+    if (typeof window !== "undefined") {
+      localStorage.setItem("sorotask_wallet_disconnected", "true");
+    }
   }, []);
 
   const clearError = useCallback(() => {
@@ -237,6 +252,9 @@ export function WalletProvider({ children }: { children: React.ReactNode }) {
         errorCode,
         errorMessage,
         isLoading,
+        isConnectModalOpen,
+        openConnectModal,
+        closeConnectModal,
         connect,
         disconnect,
         clearError,
@@ -257,6 +275,25 @@ export function WalletProvider({ children }: { children: React.ReactNode }) {
  * @example
  * const { session, connect, disconnect, status } = useWallet();
  */
+const DEFAULT_WALLET_CONTEXT: WalletContextValue = {
+  status: "disconnected",
+  session: null,
+  errorCode: null,
+  errorMessage: null,
+  isLoading: false,
+  isConnectModalOpen: false,
+  openConnectModal: () => {},
+  closeConnectModal: () => {},
+  connect: async () => {},
+  disconnect: () => {},
+  clearError: () => {},
+};
+
+export function useWalletOptional(): WalletContextValue {
+  const ctx = useContext(WalletContext);
+  return ctx || DEFAULT_WALLET_CONTEXT;
+}
+
 export function useWallet(): WalletContextValue {
   const ctx = useContext(WalletContext);
   if (!ctx) {

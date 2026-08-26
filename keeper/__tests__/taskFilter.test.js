@@ -360,9 +360,9 @@ describe('TaskFilterChain', () => {
     it('applies filters in registration order', () => {
       const order = [];
       const chain = new TaskFilterChain();
-      chain.addFilter('first', (id) => { order.push('first'); return { pass: true, reason: 'ok' }; });
-      chain.addFilter('second', (id) => { order.push('second'); return { pass: true, reason: 'ok' }; });
-      chain.addFilter('third', (id) => { order.push('third'); return { pass: true, reason: 'ok' }; });
+      chain.addFilter('first', (_id) => { order.push('first'); return { pass: true, reason: 'ok' }; });
+      chain.addFilter('second', (_id) => { order.push('second'); return { pass: true, reason: 'ok' }; });
+      chain.addFilter('third', (_id) => { order.push('third'); return { pass: true, reason: 'ok' }; });
 
       chain.filterTaskIds([1], {});
       expect(order).toEqual(['first', 'second', 'third']);

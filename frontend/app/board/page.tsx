@@ -1,16 +1,21 @@
 "use client";
 
-import { useEffect, useRef } from "react";
+import { useEffect, useRef, Suspense } from "react";
 import { useLayoutStore } from "@/src/store/layoutStore";
 import SplitPaneLayout from "@/src/components/layout/SplitPaneLayout";
 import Board from "@/components/board/Board";
+import { createPerformanceMonitor, afterNextPaint } from "@/src/lib/frontend-performance";
 
-export default function BoardPage() {
+const monitor = createPerformanceMonitor({ route: "/board" });
+
+function BoardPageContent() {
   const { boardScrollPositions, saveBoardScrollPosition } = useLayoutStore();
   const boardRef = useRef<HTMLDivElement>(null);
+  const finishRouteLoad = useRef(monitor.start("route_load"));
 
   // Restore scroll positions for board columns
   useEffect(() => {
+    afterNextPaint(() => finishRouteLoad.current());
     if (boardRef.current) {
       const columns = boardRef.current.querySelectorAll('[data-column-id]');
       columns.forEach((column) => {
@@ -26,7 +31,10 @@ export default function BoardPage() {
     <SplitPaneLayout>
       <div className="h-full flex flex-col bg-neutral-950">
         {/* Header */}
-        <div className="px-6 py-4 border-b border-neutral-700 flex-shrink-0">
+        <div
+          data-onboarding="board"
+          className="px-6 py-4 border-b border-neutral-700 flex-shrink-0"
+        >
           <h1 className="text-2xl font-bold text-neutral-100 mb-2">Board</h1>
           <p className="text-sm text-neutral-400">
             Organize your tasks with drag and drop
@@ -39,5 +47,13 @@ export default function BoardPage() {
         </div>
       </div>
     </SplitPaneLayout>
+  );
+}
+
+export default function BoardPage() {
+  return (
+    <Suspense fallback={<div className="h-full flex items-center justify-center text-neutral-400">Loading...</div>}>
+      <BoardPageContent />
+    </Suspense>
   );
 }

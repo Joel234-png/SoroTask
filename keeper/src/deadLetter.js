@@ -363,7 +363,7 @@ class DeadLetterQueue extends EventEmitter {
     }
 
     const errorCodes = history.map(f => f.error.code).filter(Boolean);
-    const errorMessages = history.map(f => f.error.message);
+    const _errorMessages = history.map(f => f.error.message);
     const classifications = history.map(f => f.errorClassification);
     const phases = history.map(f => f.phase);
 

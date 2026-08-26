@@ -1,6 +1,7 @@
 "use client";
 
 import { Component, type ReactNode } from "react";
+import * as Sentry from "@sentry/nextjs";
 
 interface Props {
   children: ReactNode;
@@ -21,12 +22,24 @@ export class ErrorBoundary extends Component<Props, State> {
 
   componentDidCatch(error: Error, info: { componentStack: string }) {
     const { section } = this.props;
-    // Log with context so it's easy to trace in dev tools / monitoring
+
+    // Log to console for local debugging
     console.error("[ErrorBoundary]", {
       section: section ?? "unknown",
       message: error.message,
-      // Avoid leaking full stack to any external sink; keep it local
       componentStack: info.componentStack,
+    });
+
+    // Report to Sentry with context
+    Sentry.captureException(error, {
+      tags: {
+        section: section ?? "unknown",
+        component: "ErrorBoundary",
+      },
+      extra: {
+        componentStack: info.componentStack,
+        section: section ?? "unknown",
+      },
     });
   }
 

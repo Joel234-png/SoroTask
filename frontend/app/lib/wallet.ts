@@ -50,11 +50,31 @@ export class WalletConnectionError extends Error {
 export const EXPECTED_NETWORK_PASSPHRASE =
   "Test SDF Future Network ; October 2022";
 
+const E2E_MOCK_ADDRESS =
+  "GAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA";
+
+function isE2EMockWalletEnabled(): boolean {
+  return process.env.NEXT_PUBLIC_E2E_MOCK_WALLET === "true";
+}
+
+function getE2EMockSession(): WalletSession {
+  return {
+    address: E2E_MOCK_ADDRESS,
+    network: {
+      network: "Futurenet",
+      networkUrl: "https://horizon-futurenet.stellar.org",
+      networkPassphrase: EXPECTED_NETWORK_PASSPHRASE,
+      sorobanRpcUrl: "https://rpc-futurenet.stellar.org",
+    },
+  };
+}
+
 /**
  * Returns true if the Freighter extension is installed in the browser.
  * Safe to call on the server — returns false when window is undefined.
  */
 export async function isFreighterInstalled(): Promise<boolean> {
+  if (isE2EMockWalletEnabled()) return true;
   if (typeof window === "undefined") return false;
   try {
     const result = await isConnected();
@@ -68,6 +88,7 @@ export async function isFreighterInstalled(): Promise<boolean> {
  * Returns true if the user has previously authorised this app in Freighter.
  */
 export async function isAppAllowed(): Promise<boolean> {
+  if (isE2EMockWalletEnabled()) return false;
   if (typeof window === "undefined") return false;
   try {
     const result = await isAllowed();
@@ -84,6 +105,15 @@ export async function isAppAllowed(): Promise<boolean> {
  * - Throws WalletConnectionError with a typed code on failure.
  */
 export async function connectWallet(): Promise<WalletSession> {
+  if (isE2EMockWalletEnabled()) {
+    return getE2EMockSession();
+  }
+
+  // Clear the intentional disconnect flag so they can connect again
+  if (typeof window !== "undefined") {
+    localStorage.removeItem("sorotask_wallet_disconnected");
+  }
+
   // 1. Check extension is installed
   const installed = await isFreighterInstalled();
   if (!installed) {
@@ -111,7 +141,17 @@ export async function connectWallet(): Promise<WalletSession> {
   }
 
   // 3. Fetch network details
-  const networkResult = await getNetworkDetails();
+  // Add a small delay to prevent race conditions in the Freighter extension's internal state
+  await new Promise((resolve) => setTimeout(resolve, 500));
+  
+  let networkResult = await getNetworkDetails();
+  
+  // Retry once if it fails, just in case Freighter's message port isn't fully ready
+  if (networkResult.error) {
+    await new Promise((resolve) => setTimeout(resolve, 500));
+    networkResult = await getNetworkDetails();
+  }
+
   if (networkResult.error) {
     throw new WalletConnectionError(
       "UNKNOWN",
@@ -137,22 +177,41 @@ export async function connectWallet(): Promise<WalletSession> {
   return { address, network: networkDetails };
 }
 
+const withTimeout = <T>(promise: Promise<T>, ms: number = 3000): Promise<T> => {
+  return Promise.race([
+    promise,
+    new Promise<T>((_, reject) => setTimeout(() => reject(new Error(`Timeout after ${ms}ms`)), ms))
+  ]);
+};
+
 /**
  * Silently re-hydrates the session if the user has already authorised the app.
  * Returns null if Freighter is not installed, not allowed, or returns no address.
  * Never throws — safe to call on mount.
  */
 export async function restoreSession(): Promise<WalletSession | null> {
+  if (isE2EMockWalletEnabled()) return null;
   if (typeof window === "undefined") return null;
+  
+  // If the user explicitly disconnected, do not auto-rehydrate.
+  if (localStorage.getItem("sorotask_wallet_disconnected") === "true") {
+    return null;
+  }
+
   try {
-    const allowed = await isAppAllowed();
+    const allowed = await withTimeout(isAppAllowed());
     if (!allowed) return null;
 
-    const addressResult = await getAddress();
+    const addressResult = await withTimeout(getAddress());
     if (addressResult.error || !addressResult.address) return null;
 
-    const networkResult = await getNetworkDetails();
+    const networkResult = await withTimeout(getNetworkDetails());
     if (networkResult.error) return null;
+
+    // Enforce Futurenet on page reload
+    if (networkResult.networkPassphrase !== EXPECTED_NETWORK_PASSPHRASE) {
+      return null;
+    }
 
     return {
       address: addressResult.address,
@@ -179,10 +238,15 @@ export function watchWalletChanges(
   onUpdate: (session: WalletSession | null) => void,
   pollMs = 3000,
 ): () => void {
+  if (isE2EMockWalletEnabled()) {
+    return () => {};
+  }
+
   const watcher = new WatchWalletChanges(pollMs);
 
   watcher.watch(({ address, network, networkPassphrase }) => {
-    if (!address) {
+    // If no address or wrong network, disconnect immediately
+    if (!address || networkPassphrase !== EXPECTED_NETWORK_PASSPHRASE) {
       onUpdate(null);
       return;
     }

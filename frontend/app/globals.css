@@ -1,9 +1,8 @@
 @import "tailwindcss";
-@import "design-tokens.css";
 
 :root {
-  --background: #ffffff;
-  --foreground: #171717;
+  --background: var(--theme-background, var(--fallback-bg, #ffffff));
+  --foreground: var(--theme-foreground, var(--fallback-fg, #171717));
   /* Focus ring tokens – single source of truth */
   --focus-ring-color: #3b82f6;
   --focus-ring-offset: 3px;
@@ -11,6 +10,8 @@
 }
 
 [data-theme="dark"] {
+  --background: var(--theme-background, var(--fallback-bg, #0a0a0a));
+  --foreground: var(--theme-foreground, var(--fallback-fg, #ededed));
   --bg-base: #09090b;
   --bg-surface: #18181b;
   --bg-elevated: #27272a;

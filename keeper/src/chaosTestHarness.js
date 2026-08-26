@@ -195,7 +195,7 @@ class ChaosTestHarness {
     // Stop chaos server
     if (chaosServer && typeof chaosServer.close === 'function') {
       try {
-        chaosServer.close();
+        await chaosServer.close();
         this.logger.info('Chaos RPC server stopped');
       } catch (error) {
         this.logger.error('Error stopping chaos server', { error: error.message });
@@ -257,7 +257,7 @@ class ChaosTestHarness {
       metrics.rpc_latency_ms = metrics.rpc_latency_ms || [];
       metrics.rpc_latency_ms.push(latency);
       
-    } catch (error) {
+    } catch (_error) {
       metrics.rpc_failures = (metrics.rpc_failures || 0) + 1;
       // Don't rethrow - we're testing resilience
     }

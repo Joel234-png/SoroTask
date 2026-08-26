@@ -71,8 +71,11 @@ const FormField: React.FC<FormFieldProps> = ({
       return children;
     }
 
+    const inputId = `field-${name}`;
     const commonProps = {
+      id: inputId,
       name,
+      'data-testid': `${name}-input`,
       value: value || '',
       onChange: (e: React.ChangeEvent<HTMLInputElement | HTMLTextAreaElement>) => 
         onChange(type === 'number' && !preserveInput ? Number(e.target.value) : e.target.value),
@@ -106,7 +109,7 @@ const FormField: React.FC<FormFieldProps> = ({
   return (
     <div className={`space-y-2 ${className}`}>
       {label && (
-        <label className="block text-sm font-medium text-neutral-400">
+        <label htmlFor={`field-${name}`} className="block text-sm font-medium text-neutral-400">
           {label}
           {required && <span className="text-red-400 ml-1">*</span>}
           {isValidating && (

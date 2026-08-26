@@ -1,12 +1,24 @@
-const { SorobanRpc, xdr, scValToNative, nativeToScVal, Address, Contract } = require("@stellar/stellar-sdk");
+const { rpc: SorobanRpc, xdr, scValToNative, nativeToScVal, Address, Contract } = require("@stellar/stellar-sdk");
 const sqlite3 = require("sqlite3").verbose();
+const {
+  buildRepairPlan,
+  compareTaskState,
+  mapOnChainTask,
+} = require("./reconciliation");
+const { runStaleTaskCleanup } = require("./staleTasks");
+const { startApiServer } = require("./api");
+const { broadcastEvent } = require("./wsServer");
+const { computeAndStoreLedgerMerkle } = require("./merkleStore");
+const { scheduleArchival } = require("./archival");
+const { pubsub, EVENT_ADDED } = require("./graphql/pubsub");
 
 // Configuration
 const RPC_URL = "https://soroban-testnet.stellar.org"; // Change as needed
-const CONTRACT_ID = "YOUR_CONTRACT_ID"; // Replace with actual contract ID
-const DB_FILE = "./indexer.db";
+const CONTRACT_ID = process.env.CONTRACT_ID || "CCKANVNJJIKGYU4TYTZBGL5JQVLPW33KQUW6JFHPLKXDLQEZETHOUAMJ"; // Replace with actual contract ID
+const DB_FILE = process.env.DB_FILE || "./indexer.db";
 const POLL_INTERVAL_MS = 6000; // 6 seconds
 const RECONCILE_INTERVAL_MS = 300000; // 5 minutes
+const STALE_CLEANUP_INTERVAL_MS = 86400000; // 24 hours
 
 // Initialize RPC server
 const rpc = new SorobanRpc.Server(RPC_URL);
@@ -60,8 +72,37 @@ const db = new sqlite3.Database(DB_FILE, (err) => {
   }
 });
 
+// Promise-style adapters over the callback `db` so shared modules (merkleStore)
+// can run against the indexer's live database connection.
+const dbDeps = {
+  queryAll: (sql, params = []) =>
+    new Promise((resolve, reject) =>
+      db.all(sql, params, (err, rows) => (err ? reject(err) : resolve(rows)))),
+  queryGet: (sql, params = []) =>
+    new Promise((resolve, reject) =>
+      db.get(sql, params, (err, row) => (err ? reject(err) : resolve(row)))),
+  queryRun: (sql, params = []) =>
+    new Promise((resolve, reject) =>
+      db.run(sql, params, function (err) { return err ? reject(err) : resolve(this); })),
+};
+
 // Helper to store cursor (last processed paging token)
-let cursor = "now"; // Start from now; in production, load from storage
+let cursor = "0"; // Start from 0; will be updated to latest ledger on first poll
+
+// Cache invalidation engine (no Redis by default; swap in a real client via env)
+const cacheInvalidator = new CacheInvalidationEngine();
+
+// Ledger gap detector — invalidates cache whenever sequence continuity breaks
+const gapDetector = new LedgerGapDetector({
+  cacheInvalidator,
+  maxAllowedGap: 1,
+  onGap: (info) => {
+    console.warn(
+      `[GapDetector] Ledger gap of ${info.gapSize} detected (${info.from} → ${info.to}). ` +
+      `Cache flushed to prevent stale reads.`
+    );
+  },
+});
 
 // Event handler mapping
 async function handleEvent(event) {
@@ -125,11 +166,32 @@ async function handleEvent(event) {
     name,
     taskId,
     dataJson,
-    (err) => {
+    function (err) {
       if (err) {
         console.error("Error inserting event:", err.message);
       } else {
+        recordEventIndexed(name);
         console.log(`Stored event: ${name} for task ${taskId} at ledger ${event.ledgerSequence}`);
+        // Issue #861: push newly-ingested events to subscribed WebSocket clients.
+        broadcastEvent({
+          ledger_sequence: event.ledgerSequence,
+          contract_id: CONTRACT_ID,
+          event_name: name,
+          task_id: taskId,
+          data: JSON.parse(dataJson),
+        });
+        // Issue #824: publish to the GraphQL `eventAdded` subscription.
+        pubsub.publish(EVENT_ADDED, {
+          eventAdded: {
+            id: this.lastID,
+            ledger_sequence: event.ledgerSequence,
+            contract_id: CONTRACT_ID,
+            event_name: name,
+            task_id: taskId,
+            data_json: dataJson,
+            processed_at: new Date().toISOString(),
+          },
+        });
       }
     }
   );
@@ -138,17 +200,34 @@ async function handleEvent(event) {
   // After storing event, reconcile this task to ensure state is correct
   if (taskId) {
     await reconcileTask(taskId);
+    cacheInvalidator.invalidateForEvent(name, taskId, JSON.parse(dataJson || '{}'));
   }
 }
 
 // Fetch on-chain task state
 async function fetchOnChainTask(taskId) {
   try {
-    const account = await rpc.getAccount(CONTRACT_ID);
-    const result = await rpc.simulateTransaction(
-      contract.call("get_task", nativeToScVal(taskId, { type: "u64" })),
-      { sourceAccount: account }
-    );
+    const { Keypair, TransactionBuilder, Networks, Operation } = require("@stellar/stellar-sdk");
+    const source = Keypair.random();
+    const account = new (require("@stellar/stellar-sdk").Account)(source.publicKey(), "0");
+
+    let operation;
+    if (typeof contract.call === 'function') {
+      operation = contract.call("get_task", nativeToScVal(taskId, { type: "u64" }));
+    } else {
+      operation = Operation.invokeContract({
+        contract: CONTRACT_ID,
+        function: "get_task",
+        args: [nativeToScVal(taskId, { type: "u64" })]
+      });
+    }
+
+    const tx = new TransactionBuilder(account, {
+      fee: "100",
+      networkPassphrase: Networks.TESTNET,
+    }).addOperation(operation).setTimeout(30).build();
+
+    const result = await rpc.simulateTransaction(tx);
 
     if (result.error) {
       console.error(`Error simulating get_task for task ${taskId}:`, result.error);
@@ -245,50 +324,37 @@ async function reconcileTask(taskId) {
           else resolve();
         });
       });
-      await logReconciliation(taskId, "removed", { reason: "Task no longer exists on chain" });
+      const comparison = compareTaskState(indexedTask, null);
+      await logReconciliation(taskId, "removed", {
+        reason: "Task no longer exists on chain",
+        comparison,
+        repairPlan: buildRepairPlan(comparison),
+      });
     } else {
       console.log(`[Reconciliation] Task ${taskId} not found on chain or in index`);
     }
     return;
   }
 
-  // Convert on-chain task to our model
-  const taskToUpsert = {
-    task_id: taskId,
-    creator: onChainTask.creator,
-    target: onChainTask.target,
-    function: onChainTask.function,
-    args_json: JSON.stringify(onChainTask.args || []),
-    resolver: onChainTask.resolver || null,
-    interval: Number(onChainTask.interval),
-    last_run: Number(onChainTask.last_run),
-    gas_balance: onChainTask.gas_balance.toString(),
-    whitelist_json: JSON.stringify(onChainTask.whitelist || []),
-    is_active: onChainTask.is_active,
-    blocked_by_json: JSON.stringify(onChainTask.blocked_by || [])
-  };
+  const taskToUpsert = mapOnChainTask(taskId, onChainTask);
 
   // Compare with indexed task
   let status = "unchanged";
   let details = {};
+  const comparison = compareTaskState(indexedTask, taskToUpsert);
+  const repairPlan = buildRepairPlan(comparison);
 
   if (!indexedTask) {
     status = "added";
-    details = { reason: "New task discovered on chain" };
+    details = { reason: "New task discovered on chain", comparison, repairPlan };
   } else {
-    // Check for mismatches
-    const mismatches = [];
-    if (indexedTask.creator !== taskToUpsert.creator) mismatches.push("creator");
-    if (indexedTask.target !== taskToUpsert.target) mismatches.push("target");
-    if (indexedTask.function !== taskToUpsert.function) mismatches.push("function");
-    if (indexedTask.interval !== taskToUpsert.interval) mismatches.push("interval");
-    if (indexedTask.last_run !== taskToUpsert.last_run) mismatches.push("last_run");
-    if (indexedTask.gas_balance !== taskToUpsert.gas_balance) mismatches.push("gas_balance");
-    if (indexedTask.is_active !== taskToUpsert.is_active) mismatches.push("is_active");
-
-    if (mismatches.length > 0) {
+    if (comparison.status === "drift") {
       status = "repaired";
-      details = { mismatches };
+      details = {
+        mismatches: comparison.mismatches,
+        likelyCause: comparison.likelyCause,
+        repairPlan,
+      };
     }
   }
 
@@ -346,15 +412,39 @@ async function reconcileAll() {
 // Polling loop
 async function poll() {
   try {
+    const latest = await rpc.getLatestLedger();
+    const networkHead = latest.sequence;
+
+    let startLedgerToUse = cursor;
+    if (cursor === "now" || cursor === "0" || Number(cursor) === 0) {
+      startLedgerToUse = networkHead;
+      cursor = startLedgerToUse.toString(); // Initialize cursor
+    }
+
+    updateLedgerMetrics(Number(cursor), Number(networkHead));
+
     const response = await rpc.getEvents({
-      startLedger: cursor === "now" ? undefined : cursor,
+      startLedger: Number(startLedgerToUse),
       filters: [{ type: "contract", contractIds: [CONTRACT_ID] }],
       limit: 200,
     });
 
+    const touchedLedgers = new Set();
     for (const event of response.events) {
       await handleEvent(event);
-      cursor = event.pagingToken; // Update cursor to the last event's paging token
+      touchedLedgers.add(event.ledgerSequence);
+      cursor = event.ledger.toString(); // Update cursor to the last event's ledger
+      updateLedgerMetrics(Number(cursor), Number(networkHead));
+    }
+
+    // Issue #863: (re)compute and persist a Merkle root over each ledger's
+    // event set once that ledger's events have been ingested.
+    for (const ledger of touchedLedgers) {
+      try {
+        await computeAndStoreLedgerMerkle(dbDeps, ledger);
+      } catch (merkleErr) {
+        console.error(`Error computing Merkle root for ledger ${ledger}:`, merkleErr.message);
+      }
     }
 
     // In production, persist cursor to storage (e.g., file, database) here
@@ -383,6 +473,18 @@ function handleCLI() {
     }
     return true;
   }
+
+  if (args.includes('--cleanup-stale')) {
+    const dryRun = !args.includes('--apply');
+    runStaleTaskCleanup(db, { dryRun }).then((summary) => {
+      console.log(`[Cleanup] Stale task cleanup complete: ${JSON.stringify(summary)}`);
+      process.exit(0);
+    }).catch(err => {
+      console.error(err);
+      process.exit(1);
+    });
+    return true;
+  }
   
   if (args.includes('--help') || args.includes('-h')) {
     console.log(`
@@ -392,11 +494,16 @@ Usage:
   node index.js                    Start the indexer
   node index.js --reconcile        Run full reconciliation
   node index.js -r -t <task-id>   Reconcile a specific task
+  node index.js --cleanup-stale    Preview stale indexed task cleanup
+  node index.js --cleanup-stale --apply
+                                    Archive and delete stale indexed tasks
   node index.js --help             Show this help message
 
 Options:
   -r, --reconcile    Run reconciliation
   -t, --task-id      Specify task ID for reconciliation
+  --cleanup-stale    Detect stale indexed tasks and log the planned cleanup
+  --apply            Apply stale cleanup; without this flag cleanup is dry-run only
   -h, --help         Show help
     `);
     process.exit(0);
@@ -410,12 +517,47 @@ Options:
 if (!handleCLI()) {
   // Start polling
   console.log("Starting event indexer...");
+  const { createWsServer } = require("./wsServer");
+  startApiServer(4000)
+    .then((httpServer) => {
+      // Issue #861: attach the real-time WebSocket streaming server to the
+      // same HTTP server, served at ws://<host>:4000/ws.
+      createWsServer({ server: httpServer, path: "/ws" });
+      console.log("🔌 WebSocket event stream ready at ws://localhost:4000/ws");
+    })
+    .catch(console.error);
   setInterval(poll, POLL_INTERVAL_MS);
   poll(); // Initial call
 
   // Start periodic reconciliation
   console.log("Starting periodic reconciliation (every 5 minutes)...");
   setInterval(reconcileAll, RECONCILE_INTERVAL_MS);
+
+  // Start synthetic transaction monitoring for end-to-end ingestion health
+  const syntheticMonitor = new SyntheticMonitor({
+    db,
+    rpc,
+    contractId: CONTRACT_ID,
+    intervalMs: Number(process.env.SYNTHETIC_INTERVAL_MS || 60_000),
+    latencyThresholdMs: Number(process.env.SYNTHETIC_LATENCY_THRESHOLD_MS || 30_000),
+    timeoutMs: Number(process.env.SYNTHETIC_TIMEOUT_MS || 120_000),
+    webhookUrl: process.env.SYNTHETIC_MONITOR_WEBHOOK_URL || null,
+  });
+  syntheticMonitor.start();
+
+  console.log("Starting stale task cleanup dry-run (every 24 hours)...");
+  setInterval(() => {
+    runStaleTaskCleanup(db, { dryRun: true }).then((summary) => {
+      console.log(`[Cleanup] Stale task cleanup dry-run: ${JSON.stringify(summary)}`);
+    }).catch((err) => {
+      console.error("[Cleanup] Error running stale task cleanup:", err.message);
+    });
+  }, STALE_CLEANUP_INTERVAL_MS);
+
+  // Issue #825: archive events older than ARCHIVAL_CUTOFF_DAYS (default 90)
+  // to S3 Parquet and prune them from the primary table, checked daily.
+  console.log("Starting event archival scheduler (cold storage, checked daily)...");
+  scheduleArchival(dbDeps);
 }
 
 // Graceful shutdown
@@ -428,3 +570,13 @@ process.on("SIGINT", () => {
     process.exit(0);
   });
 });
+
+module.exports = {
+  handleEvent,
+  reconcileTask,
+  reconcileAll,
+  HighAvailabilityManager,
+  CacheInvalidationEngine,
+  ParallelLedgerParser,
+};
+

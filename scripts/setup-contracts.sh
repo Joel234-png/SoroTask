@@ -3,7 +3,8 @@ set -e
 
 # Configuration
 RPC_URL="http://localhost:8000/soroban/rpc"
-NETWORK_PASSPHRASE="Local Sandbox Stellar Network ; September 2018"
+NETWORK_PASSPHRASE="Standalone Network ; February 2017"
+MAX_FUNDING_ATTEMPTS=30
 
 # 1. Setup Network in CLI
 echo "Configuring stellar-cli network..."
@@ -12,17 +13,25 @@ stellar network add --rpc-url "$RPC_URL" --network-passphrase "$NETWORK_PASSPHRA
 # 2. Generate and Fund Identities
 echo "Generating and funding identities..."
 for name in deployer keeper creator; do
-  stellar keys generate --network local $name || true
-  # Funding is usually automatic with --network local if quickstart is running,
-  # but we can try to fund again just in case.
-  # stellar keys fund $name --network local || true
+  stellar keys generate --network local "$name" || true
+  address="$(stellar keys public-key "$name")"
+  attempt=1
+  until curl -fsS "http://localhost:8000/friendbot?addr=$address" > /dev/null; do
+    if [ "$attempt" -ge "$MAX_FUNDING_ATTEMPTS" ]; then
+      echo "Failed to fund $name after $attempt attempts"
+      exit 1
+    fi
+    echo "Friendbot not ready for $name yet ($attempt/$MAX_FUNDING_ATTEMPTS); retrying..."
+    attempt=$((attempt + 1))
+    sleep 5
+  done
 done
 
 # 3. Build Contracts
 echo "Building contracts..."
-(cd contract && cargo build --target wasm32-unknown-unknown --release)
+(cd contract && cargo build --target wasm32v1-none --release)
 
-WASM_PATH="contract/target/wasm32-unknown-unknown/release/soro_task_contract.wasm"
+WASM_PATH="contract/target/wasm32v1-none/release/soro_task_contract.wasm"
 
 # 4. Deploy Main Contract
 echo "Deploying SoroTask contract..."

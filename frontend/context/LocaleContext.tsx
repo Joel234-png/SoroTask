@@ -6,14 +6,14 @@
 'use client';
 
 import React, { createContext, useState, useEffect, useCallback } from 'react';
-import type { Locale } from './index';
+import type { Locale } from '../i18n/index';
 import {
   DEFAULT_LOCALE,
   SUPPORTED_LOCALES,
   getStoredLocale,
   saveLocale,
   detectLocale,
-} from './index';
+} from '../i18n/index';
 
 interface LocaleContextType {
   locale: Locale;
