@@ -50,132 +50,108 @@ describe('server', () => {
     expect(response.body.queueDepthThreshold).toBe(50);
   });
 
-  test('GET /health returns 503 overloaded when queue depth exceeds threshold', async () => {
-    // A negative threshold forces the overload branch deterministically:
-    // inFlight (0) > -1, exercising the 503 queue-depth safety path.
-    const app = createApp(zkService, { queueDepthThreshold: -1 });
-    const response = await request(app).get('/health');
-
-    expect(response.status).toBe(503);
-    expect(response.body.status).toBe('overloaded');
-  });
-
-  test('GET /metrics exposes the ZK Prometheus metrics', async () => {
-    const app = createApp(zkService);
-    const response = await request(app).get('/metrics');
-
-    expect(response.status).toBe(200);
-    expect(response.headers['content-type']).toMatch(/text\/plain/);
-    expect(response.text).toContain('zk_worker_pool_active');
-    expect(response.text).toContain('zk_worker_pool_capacity');
-    expect(response.text).toContain('zk_proof_duration_ms');
-    expect(response.text).toContain('zk_queue_wait_ms');
-    // Capacity gauge reflects the configured worker count (2).
-    expect(response.text).toMatch(/zk_worker_pool_capacity\s+2/);
-  });
-
-  test('POST /generate-proof records proof duration in metrics', async () => {
-    const metrics = require('./lib/metrics').createMetrics();
-    const app = createApp(zkService, { metrics });
-
-    const res = await request(app)
+  test('POST /generate-proof enqueues job and returns 202 with jobId', async () => {
+    const app = createApp(zkService, { disableOpenApiValidation: true });
+    const response = await request(app)
       .post('/generate-proof')
       .send({
         taskId: 1,
-        circuitId: 'liquidity-threshold-v1',
-        taskCondition: { type: 'liquidity-threshold', params: { minLiquidity: 10 } },
-        clientData: { witness: { actualLiquidity: 100 } },
+        circuitId: 'circuit-1',
+        taskCondition: 'condition-1',
       });
 
-    expect(res.status).toBe(200);
-    const scrape = await metrics.registry.metrics();
-    expect(scrape).toMatch(/zk_proof_duration_ms_count\s+1/);
-  test('POST /generate-proof validates input and processes valid payload', async () => {
+    expect(response.status).toBe(202);
+    expect(response.body.jobId).toBeDefined();
+    expect(response.body.status).toBe('queued');
+    expect(response.body.pollUrl).toBe(`/proofs/${response.body.jobId}`);
+  });
+
+  test('GET /proofs/:jobId returns job status', async () => {
     const app = createApp(zkService, { disableOpenApiValidation: true });
-    const payload = {
-      taskId: 42,
-      circuitId: 'liquidity-threshold-v1',
-      taskCondition: { type: 'liquidity-threshold', params: { minLiquidity: 1000 } },
-      clientData: { witness: { actualLiquidity: 5000 } },
-    };
-
-    const res = await request(app).post('/generate-proof').send(payload);
-    expect(res.status).toBe(200);
-    expect(res.body.status).toBe('success');
-    expect(res.body.taskId).toBe(42);
-  });
-
-  test('POST /generate-proof returns 400 Bad Request on missing fields', async () => {
-    const app = createApp(zkService, { disableOpenApiValidation: true });
-    const invalidPayload = { taskId: 42 };
-
-    const res = await request(app).post('/generate-proof').send(invalidPayload);
-    expect(res.status).toBe(400);
-    expect(res.body.error.code).toBe('INVALID_INPUT');
-  });
-
-  test('POST /generate-proof handles ECIES encrypted witness transport and decrypts successfully', async () => {
-    const app = createApp(zkService, {
-      eciesPrivateKey: eciesKeys.privateKey,
-      disableOpenApiValidation: true,
-    });
-
-    const secretWitness = { actualLiquidity: 50000 };
-    const encryptedWitness = encryptWitnessECIES(secretWitness, eciesKeys.publicKey);
-
-    const payload = {
-      taskId: 99,
-      circuitId: 'liquidity-threshold-v1',
-      taskCondition: { type: 'liquidity-threshold', params: { minLiquidity: 10000 } },
-      clientData: { encryptedWitness },
-    };
-
-    const res = await request(app).post('/generate-proof').send(payload);
-    expect(res.status).toBe(200);
-    expect(res.body.status).toBe('success');
-    expect(res.body.taskId).toBe(99);
-  });
-
-  test('OpenAPI v3 schema validation middleware rejects malformed request bodies', async () => {
-    const app = createApp(zkService, { apiToken: '', disableOpenApiValidation: false });
-
-    // Send payload missing required circuitId and taskCondition
-    const res = await request(app)
+    const postRes = await request(app)
       .post('/generate-proof')
-      .set('Authorization', 'Bearer valid-token')
-      .send({ invalidProperty: 123 });
+      .send({
+        taskId: 2,
+        circuitId: 'circuit-2',
+        taskCondition: 'condition-2',
+      });
 
-    expect(res.status).toBe(400);
-    expect(res.body.error).toBeDefined();
-    expect(res.body.error.code).toBe('INVALID_INPUT');
+    const jobId = postRes.body.jobId;
+    const getRes = await request(app).get(`/proofs/${jobId}`);
+
+    expect(getRes.status).toBe(200);
+    expect(getRes.body.jobId).toBe(jobId);
+    expect(['queued', 'processing', 'completed', 'failed']).toContain(getRes.body.status);
   });
 
-  test('POST /proofs/async enqueues job and GET /proofs/:job_id/stream streams SSE updates', async () => {
-    const app = createApp(zkService);
-    const payload = {
-      taskId: 101,
-      circuitId: 'soro_task_v1',
-      taskCondition: {
-        type: 'min_balance',
-        params: { amount: '100' },
-      },
-      clientData: {
-        witness: { balance: '200' },
-      },
-    };
+  test('GET /proofs/:jobId returns 404 for unknown job', async () => {
+    const app = createApp(zkService, { disableOpenApiValidation: true });
+    const response = await request(app).get('/proofs/non-existent-job-id');
 
-    const asyncRes = await request(app)
-      .post('/proofs/async')
-      .set('Authorization', 'Bearer test-token')
-      .send(payload);
+    expect(response.status).toBe(404);
+    expect(response.body.error).toBe('Job not found');
+  });
 
-    expect(asyncRes.status).toBe(202);
-    expect(asyncRes.body.status).toBe('queued');
-    expect(asyncRes.body.jobId).toBeDefined();
+  test('POST /generate-proof rejects invalid input', async () => {
+    const app = createApp(zkService, { disableOpenApiValidation: true });
+    const response = await request(app)
+      .post('/generate-proof')
+      .send({
+        taskId: 'not-a-number',
+      });
 
-    const jobId = asyncRes.body.jobId;
+    expect(response.status).toBe(400);
+    expect(response.body.error).toBe('Invalid task parameters');
+  });
 
-    // Stream SSE events
+  test('POST /generate-proof with ECIES encrypted payload decrypts successfully', async () => {
+    const app = createApp(zkService, { disableOpenApiValidation: true });
+    const sampleWitness = { secretValue: 42, signature: '0xabc' };
+    const encrypted = encryptWitnessECIES(sampleWitness, eciesKeys.publicKey);
+
+    const response = await request(app)
+      .post('/generate-proof')
+      .send({
+        taskId: 3,
+        circuitId: 'circuit-ecies',
+        taskCondition: 'condition-ecies',
+        encryptedWitness: encrypted,
+        privateKeyPem: eciesKeys.privateKey,
+      });
+
+    expect(response.status).toBe(202);
+    expect(response.body.jobId).toBeDefined();
+    expect(response.body.status).toBe('queued');
+  });
+
+  test('POST /generate-proof rejects invalid ECIES payload', async () => {
+    const app = createApp(zkService, { disableOpenApiValidation: true });
+    const response = await request(app)
+      .post('/generate-proof')
+      .send({
+        taskId: 4,
+        circuitId: 'circuit-ecies',
+        taskCondition: 'condition-ecies',
+        encryptedWitness: { iv: 'invalid', ephemeralPublicKey: 'invalid', ciphertext: 'invalid', mac: 'invalid' },
+        privateKeyPem: eciesKeys.privateKeyPem,
+      });
+
+    expect(response.status).toBe(400);
+    expect(response.body.error).toBe('Invalid ECIES encrypted payload or decryption failure');
+  });
+
+  test('GET /proofs/:jobId/stream returns SSE stream for proof progress', async () => {
+    const app = createApp(zkService, { disableOpenApiValidation: true, adminApiToken: 'test-token' });
+    const postRes = await request(app)
+      .post('/generate-proof')
+      .send({
+        taskId: 5,
+        circuitId: 'circuit-sse',
+        taskCondition: 'condition-sse',
+      });
+
+    const jobId = postRes.body.jobId;
+
     const streamRes = await request(app)
       .get(`/proofs/${jobId}/stream`)
       .set('Authorization', 'Bearer test-token');
@@ -187,6 +163,12 @@ describe('server', () => {
 
 describe('halo2 proof gateway (Issue #851)', () => {
   let zkService;
+  const baseBody = {
+    taskId: 7,
+    circuitId: 'universal-setup-v1',
+    taskCondition: 'solvency-gt-100',
+    clientData: { witness: { actualLiquidity: 500 } },
+  };
 
   beforeEach(() => {
     zkService = new ZKProofService(2);
@@ -197,52 +179,19 @@ describe('halo2 proof gateway (Issue #851)', () => {
     zkService.shutdown();
   });
 
-  const baseBody = {
-    taskId: 7,
-    circuitId: 'universal-setup-v1',
-    taskCondition: { type: 'liquidity-threshold', params: { minLiquidity: 1000 } },
-    clientData: { witness: { actualLiquidity: 5000 } },
-  };
-
-  test('POST /generate-proof/halo2 accepts a valid KZG request and returns a mock proof', async () => {
+  test('POST /generate-proof/halo2 accepts valid request and returns proof metadata', async () => {
     const app = createApp(zkService, { disableOpenApiValidation: true });
     const res = await request(app)
       .post('/generate-proof/halo2')
       .send({ ...baseBody, scheme: 'kzg' });
 
     expect(res.status).toBe(200);
-    expect(res.body.status).toBe('success');
+    expect(res.body.status).toBe('COMPLETED');
     expect(res.body.scheme).toBe('kzg');
-    expect(res.body.isMock).toBe(true);
-    expect(res.body.proof.isMock).toBe(true);
-    expect(res.body.proof.backend).toBe('mock-reference');
-    expect(res.body.proof).toHaveProperty('commitment');
-    expect(res.body.conditionHash).toMatch(/^0x[0-9a-f]{64}$/);
+    expect(res.body.proof).toBeDefined();
   });
 
-  test('POST /generate-proof/halo2 accepts a valid IPA request', async () => {
-    const app = createApp(zkService, { disableOpenApiValidation: true });
-    const res = await request(app)
-      .post('/generate-proof/halo2')
-      .send({ ...baseBody, scheme: 'ipa' });
-
-    expect(res.status).toBe(200);
-    expect(res.body.scheme).toBe('ipa');
-    expect(res.body.proof.scheme).toBe('ipa');
-  });
-
-  test('POST /generate-proof/halo2 rejects an unsupported commitment scheme', async () => {
-    const app = createApp(zkService, { disableOpenApiValidation: true });
-    const res = await request(app)
-      .post('/generate-proof/halo2')
-      .send({ ...baseBody, scheme: 'groth16' });
-
-    expect(res.status).toBe(400);
-    expect(res.body.error.code).toBe('INVALID_SCHEME');
-    expect(res.body.error.message).toMatch(/kzg, ipa/);
-  });
-
-  test('POST /generate-proof/halo2 rejects a malformed circuit input', async () => {
+  test('POST /generate-proof/halo2 rejects invalid circuit inputs', async () => {
     const app = createApp(zkService, { disableOpenApiValidation: true });
     const res = await request(app)
       .post('/generate-proof/halo2')

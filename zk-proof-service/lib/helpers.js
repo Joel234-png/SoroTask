@@ -188,10 +188,13 @@ function generateECIESKeyPair() {
 }
 
 function encryptWitnessECIES(witness, recipientPublicKeyHex) {
+  const hexKey = (typeof recipientPublicKeyHex === 'object' && recipientPublicKeyHex !== null)
+    ? (recipientPublicKeyHex.publicKey || recipientPublicKeyHex.publicKeyPem)
+    : (recipientPublicKeyHex || '');
   const ephemeralKey = crypto.createECDH('secp256k1');
   ephemeralKey.generateKeys();
 
-  const sharedSecret = ephemeralKey.computeSecret(Buffer.from(recipientPublicKeyHex, 'hex'));
+  const sharedSecret = ephemeralKey.computeSecret(Buffer.from(hexKey, 'hex'));
   const aesKey = crypto.createHash('sha256').update(sharedSecret).digest();
   const iv = crypto.randomBytes(12);
 
