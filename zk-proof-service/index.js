@@ -1,7 +1,10 @@
 const crypto = require('crypto');
 const fs = require('fs');
 const path = require('path');
+const { Worker } = require('worker_threads');
 const { hashTaskCondition, isValidZkProof, zeroizeBuffer } = require('./lib/helpers');
+const { ProverJobQueue, CPU_CONCURRENCY } = require('./lib/prover-job-queue');
+const { ProofCache, createProofCacheKey } = require('./lib/proof-cache');
 const EventEmitter = require('events');
 
 // ---------------------------------------------------------------------------
@@ -235,14 +238,62 @@ class ZKProofService extends EventEmitter {
    * Initialize the service with a specific number of workers.
    * @param {number} workerCount - Number of workers in the pool.
    */
-  constructor(workerCount = 4) {
+  constructor(workerCount = CPU_CONCURRENCY, options = {}) {
     super();
     this.workerCount = workerCount;
+    this.workerMemoryMb = options.workerMemoryMb ?? 4096;
+    this.workerTimeoutMs = options.workerTimeoutMs ?? 60000;
     this.workers = [];
     this.tasks = [];
     this.isReady = false;
     this.startedAt = null;
     this.asyncJobs = new Map();
+    this.proofCache = options.proofCache ?? new ProofCache({ redisUrl: options.redisUrl ?? process.env.REDIS_URL });
+    this.inFlightProofs = new Map();
+    this.proverQueue = new ProverJobQueue({
+      redisUrl: options.redisUrl ?? process.env.REDIS_URL,
+      concurrency: CPU_CONCURRENCY,
+      processJob: async ({ taskCondition: queuedCondition, clientData: queuedData, circuitId: queuedCircuitId, circuitArtifactHash: queuedArtifactHash }, reportProgress) => {
+        reportProgress(25);
+        const proof = await this.generateProof(queuedCondition, queuedData, queuedCircuitId, queuedArtifactHash);
+        reportProgress(100);
+        return { proof, conditionHash: hashTaskCondition(queuedCondition) };
+      },
+      onProgress: (jobId, progress) => {
+        const job = this.asyncJobs.get(jobId);
+        if (!job) return;
+        job.status = 'processing';
+        job.progress = progress;
+        this.emit('jobProgress', { jobId, status: job.status, progress });
+      },
+      onComplete: (jobId, completed) => {
+        const job = this.asyncJobs.get(jobId);
+        if (!job) return;
+        const { proof: rawProof, conditionHash } = completed;
+        job.progress = 100;
+        job.status = 'completed';
+        job.result = {
+          proofId: rawProof.proofId,
+          status: 'success',
+          conditionHash,
+          proof: {
+            pi_a: rawProof.pi_a,
+            pi_b: rawProof.pi_b,
+            pi_c: rawProof.pi_c,
+            publicSignals: rawProof.publicSignals,
+          },
+          generatedAt: new Date().toISOString(),
+        };
+        this.emit('jobComplete', job);
+      },
+      onError: (jobId, error) => {
+        const job = this.asyncJobs.get(jobId);
+        if (!job) return;
+        job.status = 'failed';
+        job.error = error.message;
+        this.emit('jobError', job);
+      },
+    });
   }
 
   /**
@@ -253,8 +304,61 @@ class ZKProofService extends EventEmitter {
     this.startedAt = Date.now();
     this.workers = [];
     for (let i = 0; i < this.workerCount; i++) {
-      this.workers.push({ id: i, status: 'idle' });
+      this._spawnWorker(i);
     }
+  }
+
+  _spawnWorker(id) {
+    const entry = { id, status: 'idle', worker: null, job: null };
+    const worker = new Worker(path.join(__dirname, 'lib', 'proof-worker.js'), {
+      resourceLimits: { maxOldGenerationSizeMb: this.workerMemoryMb },
+    });
+    entry.worker = worker;
+    worker.on('message', (message) => {
+      const job = entry.job;
+      if (!job) return;
+      clearTimeout(job.timeout);
+      entry.job = null;
+      entry.status = 'idle';
+      if (message.error) job.reject(new Error(`Proof generation failed: ${message.error}`));
+      else job.resolve(message.proof);
+    });
+    worker.on('error', (error) => {
+      const job = entry.job;
+      if (job) {
+        clearTimeout(job.timeout);
+        entry.job = null;
+        job.reject(this._workerError(error));
+      }
+      this._replaceWorker(entry);
+    });
+    worker.on('exit', (code) => {
+      if (entry.worker !== worker) return;
+      const job = entry.job;
+      if (job) {
+        clearTimeout(job.timeout);
+        entry.job = null;
+        job.reject(new Error(`Proof worker exited with code ${code}`));
+      }
+      if (this.isReady) this._replaceWorker(entry);
+    });
+    this.workers.push(entry);
+  }
+
+  _workerError(error) {
+    if (error && error.code === 'ERR_WORKER_OUT_OF_MEMORY') {
+      const outOfMemory = new Error('Proof worker exceeded memory limit');
+      outOfMemory.code = 'PROVER_MEMORY_LIMIT';
+      return outOfMemory;
+    }
+    return error;
+  }
+
+  _replaceWorker(entry) {
+    const index = this.workers.indexOf(entry);
+    if (index === -1) return;
+    this.workers.splice(index, 1);
+    if (this.isReady) this._spawnWorker(entry.id);
   }
 
   /**
@@ -303,7 +407,7 @@ class ZKProofService extends EventEmitter {
    * @param {Object} clientData - The light client data.
    * @returns {Promise<Object>} The generated proof.
    */
-  async generateProof(taskCondition, clientData) {
+  async generateProof(taskCondition, clientData, circuitId = 'default', circuitArtifactHash = '') {
     if (!this.isReady) {
       throw new Error('Service not initialized');
     }
@@ -312,36 +416,36 @@ class ZKProofService extends EventEmitter {
       throw new Error('Invalid input data');
     }
 
+    const cacheKey = createProofCacheKey(circuitId, taskCondition, clientData, circuitArtifactHash);
+    const cached = await this.proofCache.get(cacheKey);
+    if (cached) return { ...cached, cached: true };
+    if (this.inFlightProofs.has(cacheKey)) return this.inFlightProofs.get(cacheKey);
+
     const worker = this._acquireWorker();
     if (!worker) {
       throw new Error('Worker pool at capacity');
     }
 
-    return new Promise((resolve, reject) => {
-      try {
-        const proofId = crypto.randomUUID();
-        const proof = {
-          proofId,
-          status: 'success',
-          pi_a: ['0x1', '0x2'],
-          pi_b: [['0x3', '0x4'], ['0x5', '0x6']],
-          pi_c: ['0x7', '0x8'],
-          publicSignals: ['0x9'],
-        };
-
-        setTimeout(() => {
-          this._releaseWorker(worker);
-          if (clientData && clientData._witnessBuffer) {
-            zeroizeBuffer(clientData._witnessBuffer);
-          }
-          resolve(proof);
-        }, 100);
-      } catch (error) {
-        this._releaseWorker(worker);
-        console.error(`Proof generation failed: ${error.message}`);
-        reject(new Error(`Proof generation failed: ${error.message}`));
-      }
+    const proofPromise = new Promise((resolve, reject) => {
+      const timeout = setTimeout(() => {
+        worker.job = null;
+        worker.status = 'recycling';
+        const error = new Error('Proof generation exceeded 60 seconds');
+        error.code = 'PROVER_TIMEOUT';
+        reject(error);
+        worker.worker.terminate();
+      }, this.workerTimeoutMs);
+      worker.job = { resolve, reject, timeout };
+      worker.worker.postMessage({ taskCondition, clientData });
     });
+    this.inFlightProofs.set(cacheKey, proofPromise);
+    proofPromise
+      .then((proof) => this.proofCache.set(cacheKey, proof).catch(() => {}))
+      .finally(() => {
+        this.inFlightProofs.delete(cacheKey);
+      })
+      .catch(() => {});
+    return proofPromise;
   }
 
   /**
@@ -386,7 +490,7 @@ class ZKProofService extends EventEmitter {
    * @param {Object} clientData
    * @returns {Object} Job info containing jobId, status, createdAt.
    */
-  enqueueAsyncJob(taskCondition, clientData) {
+  enqueueAsyncJob(taskCondition, clientData, circuitId = 'default', circuitArtifactHash = '') {
     if (!this.isReady) {
       throw new Error('Service not initialized');
     }
@@ -402,41 +506,8 @@ class ZKProofService extends EventEmitter {
     };
 
     this.asyncJobs.set(jobId, job);
-
-    // Asynchronously process proof generation
-    setImmediate(async () => {
-      try {
-        job.status = 'processing';
-        job.progress = 25;
-        this.emit('jobProgress', { jobId, status: job.status, progress: job.progress });
-
-        job.progress = 50;
-        this.emit('jobProgress', { jobId, status: job.status, progress: job.progress });
-
-        const rawProof = await this.generateProof(taskCondition, clientData);
-        const conditionHash = hashTaskCondition(taskCondition);
-
-        job.progress = 100;
-        job.status = 'completed';
-        job.result = {
-          proofId: rawProof.proofId,
-          status: 'success',
-          conditionHash,
-          proof: {
-            pi_a: rawProof.pi_a,
-            pi_b: rawProof.pi_b,
-            pi_c: rawProof.pi_c,
-            publicSignals: rawProof.publicSignals,
-          },
-          generatedAt: new Date().toISOString(),
-        };
-
-        this.emit('jobComplete', job);
-      } catch (err) {
-        job.status = 'failed';
-        job.error = err.message;
-        this.emit('jobError', job);
-      }
+    this.proverQueue.add(jobId, { taskCondition, clientData, circuitId, circuitArtifactHash }).catch((error) => {
+      this.proverQueue.onError(jobId, error);
     });
 
     return {
@@ -451,8 +522,8 @@ class ZKProofService extends EventEmitter {
    * @param {string} jobId
    * @returns {Object | null}
    */
-  getAsyncJob(jobId) {
-    return this.asyncJobs.get(jobId) || null;
+  async getAsyncJob(jobId) {
+    return this.asyncJobs.get(jobId) || await this.proverQueue.get(jobId);
   }
 
   /**
@@ -460,9 +531,19 @@ class ZKProofService extends EventEmitter {
    */
   shutdown() {
     this.isReady = false;
+    for (const entry of this.workers) {
+      if (entry.job) {
+        clearTimeout(entry.job.timeout);
+        entry.job.reject(new Error('Service shutting down'));
+      }
+      entry.worker.terminate();
+    }
     this.workers = [];
     this.startedAt = null;
     this.asyncJobs.clear();
+    this.inFlightProofs.clear();
+    this.proverQueue.close().catch(() => {});
+    this.proofCache.close().catch(() => {});
   }
 }
 

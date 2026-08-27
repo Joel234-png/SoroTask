@@ -5,6 +5,7 @@ const { Worker } = require('worker_threads');
 const os = require('os');
 const OpenApiValidator = require('express-openapi-validator');
 const { ZKProofService } = require('./index');
+const { CPU_CONCURRENCY } = require('./lib/prover-job-queue');
 
 const { createMetrics } = require('./lib/metrics');
 const { Halo2ProverAdapter } = require('./lib/halo2-adapter');
@@ -451,6 +452,11 @@ function createApp(zkService, options = {}) {
         timeoutMs: wasmSandboxPool.timeoutMs,
         memoryMb: wasmSandboxPool.memoryMb,
       },
+      proverWorkerLimits: {
+        timeoutMs: zkService.workerTimeoutMs,
+        memoryMb: zkService.workerMemoryMb,
+        isolated: true,
+      },
       uptimeSeconds: Math.floor((Date.now() - startTime) / 1000),
     });
   });
@@ -526,18 +532,18 @@ function createApp(zkService, options = {}) {
     }
   });
 
-  app.get('/proofs/:jobId', (req, res) => {
+  app.get('/proofs/:jobId', async (req, res) => {
     const { jobId } = req.params;
-    const job = zkService.asyncJobs.get(jobId);
+    const job = await zkService.getAsyncJob(jobId);
     if (!job) {
       return res.status(404).json({ error: 'Job not found' });
     }
     return res.json(job);
   });
 
-  app.get('/proofs/:jobId/stream', (req, res) => {
+  app.get('/proofs/:jobId/stream', async (req, res) => {
     const { jobId } = req.params;
-    const job = zkService.asyncJobs.get(jobId);
+    const job = await zkService.getAsyncJob(jobId);
     res.setHeader('Content-Type', 'text/event-stream');
     res.setHeader('Cache-Control', 'no-cache');
     res.setHeader('Connection', 'keep-alive');
@@ -552,7 +558,7 @@ function createApp(zkService, options = {}) {
   });
 
   app.post('/generate-proof', generateProofLimiter, authenticate, async (req, res) => {
-    const { taskId, circuitId, taskCondition, clientData, encryptedWitness, privateKeyPem } = req.body || {};
+    const { taskId, circuitId, circuitVersion, taskCondition, clientData, encryptedWitness, privateKeyPem } = req.body || {};
 
     if (taskId == null || typeof taskId === 'string' && isNaN(Number(taskId)) || !circuitId || !taskCondition) {
       return res.status(400).json({ error: 'Invalid task parameters' });
@@ -577,7 +583,7 @@ function createApp(zkService, options = {}) {
     }
 
     try {
-      const asyncJob = zkService.enqueueAsyncJob(taskCondition, witnessData);
+      const asyncJob = zkService.enqueueAsyncJob(taskCondition, witnessData, circuitId, getCircuitArtifactHash(circuitId, circuitVersion));
       return res.status(202).json({
         jobId: asyncJob.jobId,
         status: 'queued',
@@ -591,7 +597,7 @@ function createApp(zkService, options = {}) {
   });
 
   app.post('/generate-proof/sync', generateProofLimiter, authenticate, async (req, res) => {
-
+    const startedAt = Date.now();
     let { taskId, circuitId, taskCondition, clientData } = req.body;
     let witnessBuffer = null;
 
@@ -615,9 +621,6 @@ function createApp(zkService, options = {}) {
     inFlight += 1;
     const genStart = Date.now();
     try {
-      const rawProof = await zkService.generateProof(taskCondition, clientData);
-      metrics.proofDurationMs.observe(Date.now() - genStart);
-      syncPoolGauges();
       const constraint = checkConstraint(taskCondition, clientData, circuitId);
       if (!constraint.ok) {
         return sendError(
@@ -632,10 +635,12 @@ function createApp(zkService, options = {}) {
       // Wrap the real (CPU) proof generation in the timing harness so there is
       // an apples-to-apples wall-clock baseline for a future GPU backend (#850).
       const timed = await withProofTiming(
-        () => zkService.generateProof(taskCondition, clientData),
+        () => zkService.generateProof(taskCondition, clientData, circuitId, getCircuitArtifactHash(circuitId, req.body?.circuitVersion)),
         { backend: proverBackend.backend, label: 'groth16-generate-proof' },
       );
-      rawProof = timed.result;
+      const rawProof = timed.result;
+      metrics.proofDurationMs.observe(Date.now() - genStart);
+      syncPoolGauges();
       const conditionHash = hashTaskCondition(taskCondition);
       const proof = {
         pi_a: rawProof.pi_a,
@@ -658,6 +663,12 @@ function createApp(zkService, options = {}) {
         processingTimeMs: Date.now() - startedAt,
       });
     } catch (error) {
+      if (error.code === 'PROVER_MEMORY_LIMIT') {
+        return sendError(res, 422, 'PROVER_MEMORY_LIMIT', error.message);
+      }
+      if (error.code === 'PROVER_TIMEOUT') {
+        return sendError(res, 504, 'PROVER_TIMEOUT', error.message);
+      }
       if (error.message === 'Worker pool at capacity') {
         return sendError(res, 503, 'SERVICE_NOT_READY', error.message);
       }
@@ -745,7 +756,7 @@ function createApp(zkService, options = {}) {
       return sendError(res, 503, 'SERVICE_NOT_READY', 'ZK proof worker pool is not initialized');
     }
 
-    const { taskId, circuitId, taskCondition, clientData } = req.body;
+    const { taskId, circuitId, circuitVersion, taskCondition, clientData } = req.body;
     const constraint = checkConstraint(taskCondition, clientData, circuitId);
     if (!constraint.ok) {
       return sendError(
@@ -758,7 +769,7 @@ function createApp(zkService, options = {}) {
     }
 
     try {
-      const asyncJob = zkService.enqueueAsyncJob(taskCondition, clientData);
+      const asyncJob = zkService.enqueueAsyncJob(taskCondition, clientData, circuitId, getCircuitArtifactHash(circuitId, circuitVersion));
       return res.status(202).json({
         jobId: asyncJob.jobId,
         status: asyncJob.status,
@@ -840,6 +851,11 @@ function createApp(zkService, options = {}) {
   // The registry instance is injectable for testing (options.circuitRegistry).
   // -------------------------------------------------------------------------
   const circuitRegistry = options.circuitRegistry ?? new CircuitRegistry();
+  function getCircuitArtifactHash(circuitId, circuitVersion) {
+    if (!circuitVersion) return '';
+    const manifest = circuitRegistry.getManifest(circuitId, circuitVersion);
+    return manifest ? sha256Hex(Buffer.from(JSON.stringify(manifest))) : '';
+  }
   app.use(createCircuitRoutes(circuitRegistry));
 
   // -------------------------------------------------------------------------
@@ -1065,7 +1081,7 @@ function createApp(zkService, options = {}) {
 }
 
 function createServer(options = {}) {
-  const workerCount = options.workerCount ?? (Number(process.env.ZK_PROOF_WORKERS) || 4);
+  const workerCount = options.workerCount ?? (Number(process.env.ZK_PROOF_WORKERS) || CPU_CONCURRENCY);
   const zkService = options.zkService ?? new ZKProofService(workerCount);
   if (!options.skipInitialize) {
     zkService.initialize();
