@@ -15,6 +15,11 @@ function getRedisClient() {
     // create a local in-memory shim with minimal API
     const map = new Map();
     redisClient = {
+      isLocalFallback: true,
+      status: 'ready',
+      async ping() {
+        return 'PONG';
+      },
       async set(key, value, mode, flag, ttlMs) {
         if (mode !== 'PX' || flag !== 'NX') throw new Error('Unsupported local set signature');
         if (map.has(key)) return null;
@@ -45,6 +50,7 @@ function getRedisClient() {
   }
 
   redisClient = new Redis(url);
+  redisClient.isLocalFallback = false;
   redisClient.on('error', (err) => logger.error('Redis error', { error: err.message }));
   return redisClient;
 }
