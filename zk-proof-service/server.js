@@ -11,6 +11,7 @@ const {
   createCircuitRoutes,
   sha256Hex,
 } = require('./lib/circuit-registry');
+const { CircuitIntegrityVerifier } = require('./lib/circuit-integrity');
 const {
   hashTaskCondition,
   serializeProof,
@@ -619,12 +620,28 @@ function createApp(zkService, options = {}) {
   return app;
 }
 
+async function createServer(options = {}) {
+  const workerCount = options.workerCount ?? (Number(process.env.ZK_PROOF_WORKERS) || 4);
 function createServer(options = {}) {
   const workerCount = options.workerCount ?? (Number(process.env.ZK_PROOF_WORKERS) || CPU_CONCURRENCY);
   const zkService = options.zkService ?? new ZKProofService(workerCount);
   if (!options.skipInitialize) {
     zkService.initialize();
   }
+
+  // Issue #1077: Boot-time circuit integrity attestation
+  // Verify all circuit artifact checksums before accepting any proof requests.
+  if (!options.skipAttestation) {
+    const integrityVerifier = options.integrityVerifier ?? new CircuitIntegrityVerifier({
+      circuitsDir: options.circuitsDir || path.join(__dirname, 'circuits'),
+      signingSecret: options.signingSecret || process.env.CIRCUIT_MANIFEST_SECRET || '',
+    });
+    const attestation = await integrityVerifier.attestOnBoot();
+    if (!attestation.ok) {
+      throw new Error('Circuit integrity attestation failed. Service cannot start.');
+    }
+  }
+
   const app = createApp(zkService, options);
   return { app, zkService };
   const zkService = options.zkService || new ZKProofService(options.workerCount || 4);
@@ -633,6 +650,13 @@ function createServer(options = {}) {
 }
 
 if (require.main === module) {
+  createServer().then(({ app }) => {
+    app.listen(PORT, () => {
+      console.log(`ZK Proof Service listening on port ${PORT}`);
+    });
+  }).catch((err) => {
+    console.error(`[FATAL] Server startup failed: ${err.message}`);
+    process.exit(1);
   const { app } = createServer();
   app.listen(PORT, () => {
     console.log(`ZK Proof Service listening on port ${PORT}`);
