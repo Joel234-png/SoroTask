@@ -2,6 +2,27 @@ const express = require('express');
 const path = require('path');
 const { middleware } = require('express-openapi-validator');
 const { ZKProofService } = require('./index');
+
+const { createMetrics } = require('./lib/metrics');
+const { Halo2ProverAdapter } = require('./lib/halo2-adapter');
+const { selectProverBackend, withProofTiming } = require('./lib/prover-backend');
+const {
+  CircuitRegistry,
+  createCircuitRoutes,
+  sha256Hex,
+} = require('./lib/circuit-registry');
+const {
+  hashTaskCondition,
+  serializeProof,
+  checkConstraint,
+  decryptWitnessECIES,
+  zeroizeBuffer,
+} = require('./lib/helpers');
+const {
+  withEphemeralDir,
+  writeFile,
+  startScrubber,
+} = require('./lib/ephemeralDir');
 const { CPU_CONCURRENCY } = require('./lib/prover-job-queue');
 
 const SERVICE_VERSION = '1.0.0';
@@ -77,7 +98,12 @@ function createApp(zkService, options = {}) {
   });
   app.post('/generate-proof', async (req, res, next) => {
     try {
-      const outputs = await wasmSandboxPool.runInSandbox(wasmBytes, inputs ?? {});
+      // Use ephemeral directory for WASM execution to isolate artifacts
+      const outputs = await withEphemeralDir(async (ephemeralDir) => {
+        await writeFile(ephemeralDir, 'witness.json', JSON.stringify(inputs || {}));
+        await writeFile(ephemeralDir, 'taskCondition.json', JSON.stringify(taskCondition));
+        return wasmSandboxPool.runInSandbox(wasmBytes, inputs ?? {});
+      });
       const conditionHash = hashTaskCondition(taskCondition);
       return res.json({
         status: 'success',
@@ -166,6 +192,7 @@ function createApp(zkService, options = {}) {
 
   app.post('/generate-proof/sync', generateProofLimiter, authenticate, async (req, res) => {
     const startedAt = Date.now();
+
     let { taskId, circuitId, taskCondition, clientData } = req.body;
     let witnessBuffer = null;
 
@@ -187,8 +214,26 @@ function createApp(zkService, options = {}) {
     metrics.queueWaitMs.observe(Date.now() - startedAt);
 
     inFlight += 1;
-    const genStart = Date.now();
     try {
+      return await withEphemeralDir(async (ephemeralDir) => {
+        // Write witness data to ephemeral directory for isolated prover access
+        await writeFile(ephemeralDir, 'witness.json', JSON.stringify(clientData));
+        await writeFile(ephemeralDir, 'taskCondition.json', JSON.stringify(taskCondition));
+
+        const genStart = Date.now();
+        const rawProof = await zkService.generateProof(taskCondition, clientData);
+        metrics.proofDurationMs.observe(Date.now() - genStart);
+        syncPoolGauges();
+        const constraint = checkConstraint(taskCondition, clientData, circuitId);
+        if (!constraint.ok) {
+          return sendError(
+            res,
+            422,
+            'CONSTRAINT_UNSATISFIED',
+            'Client witness does not satisfy task condition constraints',
+            constraint.details,
+          );
+        }
       const constraint = checkConstraint(taskCondition, clientData, circuitId);
       if (!constraint.ok) {
         return sendError(
@@ -217,18 +262,34 @@ function createApp(zkService, options = {}) {
         publicSignals: rawProof.publicSignals,
       };
 
-      return res.json({
-        proofId: rawProof.proofId,
-        status: 'success',
-        taskId,
-        conditionHash,
-        proof,
-        serializedProof: serializeProof(proof),
-        proverBackend: proverBackend.backend,
-        accelerated: proverBackend.accelerated,
-        generationTimeMs: timed.durationMs,
-        generatedAt: new Date().toISOString(),
-        processingTimeMs: Date.now() - startedAt,
+        // Wrap the real (CPU) proof generation in the timing harness so there is
+        // an apples-to-apples wall-clock baseline for a future GPU backend (#850).
+        const timed = await withProofTiming(
+          () => zkService.generateProof(taskCondition, clientData),
+          { backend: proverBackend.backend, label: 'groth16-generate-proof' },
+        );
+        const proofResult = timed.result;
+        const conditionHash = hashTaskCondition(taskCondition);
+        const proof = {
+          pi_a: proofResult.pi_a,
+          pi_b: proofResult.pi_b,
+          pi_c: proofResult.pi_c,
+          publicSignals: proofResult.publicSignals,
+        };
+
+        return res.json({
+          proofId: proofResult.proofId,
+          status: 'success',
+          taskId,
+          conditionHash,
+          proof,
+          serializedProof: serializeProof(proof),
+          proverBackend: proverBackend.backend,
+          accelerated: proverBackend.accelerated,
+          generationTimeMs: timed.durationMs,
+          generatedAt: new Date().toISOString(),
+          processingTimeMs: Date.now() - startedAt,
+        });
       });
     } catch (error) {
       if (error.code === 'PROVER_MEMORY_LIMIT') {
@@ -337,6 +398,10 @@ function createApp(zkService, options = {}) {
     }
 
     try {
+      // Use ephemeral directory for async proof generation to isolate artifacts
+      const asyncJob = zkService.enqueueAsyncJob(taskCondition, clientData, {
+        ephemeralDir: true,
+      });
       const asyncJob = zkService.enqueueAsyncJob(taskCondition, clientData, circuitId, getCircuitArtifactHash(circuitId, circuitVersion));
       return res.status(202).json({
         jobId: asyncJob.jobId,
@@ -569,6 +634,11 @@ function createServer(options = {}) {
 
 if (require.main === module) {
   const { app } = createServer();
+  app.listen(PORT, () => {
+    console.log(`ZK Proof Service listening on port ${PORT}`);
+    // Issue #1076: Start background scrubber to remove orphaned ephemeral dirs
+    startScrubber();
+  });
   app.listen(Number(process.env.PORT) || 3100, () => console.log('ZK Proof Service listening'));
 }
 
