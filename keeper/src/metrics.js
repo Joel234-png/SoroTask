@@ -649,6 +649,7 @@ class Metrics {
       healthIssues,
     };
   }
+}
 
 function createDefaultGasMonitor() {
   return {
