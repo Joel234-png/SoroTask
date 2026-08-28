@@ -558,6 +558,11 @@ class ExecutionQueue extends EventEmitter {
                 this.emit('task:skipped', taskId, { reason: 'distributed_lock' });
                 return;
               }
+              // Thread fencing token into attemptContext for executor to consume
+              if (distributedLockToken && typeof distributedLockToken === 'object') {
+                attemptContext.fencingToken = distributedLockToken.fencingToken;
+                attemptContext.lockToken = distributedLockToken.token;
+              }
               this.emit('task:lock-acquired', taskId, distributedLockToken);
             }
 
@@ -776,6 +781,11 @@ class ExecutionQueue extends EventEmitter {
               this.logger.info('Skipping retry task due to distributed lock contention', { taskId });
               this.emit('task:skipped', taskId, { reason: 'distributed_lock' });
               return;
+            }
+            // Thread fencing token into attemptContext for executor to consume
+            if (distributedLockToken && typeof distributedLockToken === 'object') {
+              attemptContext.fencingToken = distributedLockToken.fencingToken;
+              attemptContext.lockToken = distributedLockToken.token;
             }
             this.emit('task:lock-acquired', taskId, distributedLockToken);
           }
