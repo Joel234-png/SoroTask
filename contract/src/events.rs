@@ -185,8 +185,8 @@ impl EventLogger {
         };
 
         let topics = (
-            Symbol::new(env, "sorotask"),
-            Symbol::new(env, "state_change"),
+            Symbol::new(env, "Task"),
+            Symbol::new(env, "StateChange"),
             task_id,
         );
         env.events().publish(topics, event_data);
@@ -221,8 +221,8 @@ impl EventLogger {
         };
 
         let topics = (
-            Symbol::new(env, "sorotask"),
-            Symbol::new(env, "execution"),
+            Symbol::new(env, "Task"),
+            Symbol::new(env, "Executed"),
             task_id,
         );
         env.events().publish(topics, event_data);
@@ -250,8 +250,8 @@ impl EventLogger {
         };
 
         let topics = (
-            Symbol::new(env, "sorotask"),
-            Symbol::new(env, "exec_step"),
+            Symbol::new(env, "Task"),
+            Symbol::new(env, "StepExecuted"),
             task_id,
         );
         env.events().publish(topics, event_data);
@@ -277,8 +277,8 @@ impl EventLogger {
         };
 
         let topics = (
-            Symbol::new(env, "sorotask"),
-            Symbol::new(env, "access_log"),
+            Symbol::new(env, "Auth"),
+            Symbol::new(env, "Access"),
             actor,
         );
         env.events().publish(topics, event_data);
@@ -301,8 +301,8 @@ impl EventLogger {
         };
 
         let topics = (
-            Symbol::new(env, "sorotask"),
-            Symbol::new(env, "task_invalidated"),
+            Symbol::new(env, "Task"),
+            Symbol::new(env, "Invalidated"),
             task_id,
         );
         env.events().publish(topics, event_data);
@@ -325,8 +325,8 @@ impl EventLogger {
         };
 
         let topics = (
-            Symbol::new(env, "sorotask"),
-            Symbol::new(env, "rate_limit_exceeded"),
+            Symbol::new(env, "Task"),
+            Symbol::new(env, "RateLimited"),
             task_id,
         );
         env.events().publish(topics, event_data);
@@ -348,8 +348,8 @@ impl EventLogger {
         };
 
         let topics = (
-            Symbol::new(env, "sorotask"),
-            Symbol::new(env, "encrypted_params_registered"),
+            Symbol::new(env, "Task"),
+            Symbol::new(env, "EncryptedParams"),
             task_id,
         );
         env.events().publish(topics, event_data);
@@ -367,7 +367,7 @@ impl EventLogger {
         let timestamp = env.ledger().timestamp();
         let event_data = DelegationPoolEvent {
             delegator,
-            keeper,
+            keeper: keeper.clone(),
             amount,
             commission_rate,
             action: action.clone(),
@@ -375,9 +375,9 @@ impl EventLogger {
         };
 
         let topics = (
-            Symbol::new(env, "sorotask"),
-            Symbol::new(env, "delegation_pool"),
+            Symbol::new(env, "Stake"),
             action,
+            keeper,
         );
         env.events().publish(topics, event_data);
     }
