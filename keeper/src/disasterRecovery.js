@@ -171,36 +171,63 @@ class MultiRegionRPCClient {
   }
 
   getLatencyHeatmap() {
-    return this.endpoints.map((ep) => ({
-      index: ep.index,
-      region: ep.region,
-      url: ep.url,
-      avgLatencyMs: ep.avgLatencyMs,
-      latestLatencyMs: ep.latencyMs,
-      errorRatePercent: Math.round((ep.errorRate || 0) * 100) / 100,
-      consecutiveFailures: ep.consecutiveFailures,
-      score: ep.score,
-      status: ep.unavailable ? 'DEGRADED' : ep.avgLatencyMs > 500 ? 'HIGH_LATENCY' : 'HEALTHY',
-    }));
+    const now = Date.now();
+    return this.endpoints.map((ep) => {
+      // Filter rolling 1-minute window
+      const validSamples = (ep.latencySamples || []).filter(
+        (s) => typeof s === 'object' ? (now - s.timestamp <= 60000) : true
+      );
+      const values = validSamples.map((s) => typeof s === 'object' ? s.latencyMs : s);
+      const avgOneMin = values.length > 0
+        ? Math.round(values.reduce((a, b) => a + b, 0) / values.length)
+        : ep.avgLatencyMs;
+
+      let status = 'HEALTHY';
+      if (ep.unavailable || ep.consecutiveFailures >= this.failureThreshold) {
+        status = 'DEGRADED';
+      } else if (avgOneMin > 500) {
+        status = 'HIGH_LATENCY';
+      }
+
+      return {
+        index: ep.index,
+        region: ep.region,
+        url: ep.url,
+        avgLatencyMs: avgOneMin,
+        latestLatencyMs: ep.latencyMs,
+        rollingOneMinuteLatencyMs: avgOneMin,
+        rollingSamplesCount: values.length,
+        errorRatePercent: Math.round((ep.errorRate || 0) * 100) / 100,
+        consecutiveFailures: ep.consecutiveFailures,
+        score: ep.score,
+        status,
+      };
+    });
   }
 
   markSuccess(index, latencyMs = 0) {
     const endpoint = this.endpoints[index];
+    const now = Date.now();
     endpoint.score = Math.min(100, endpoint.score + 5);
     endpoint.consecutiveFailures = 0;
     endpoint.unavailable = false;
     endpoint.cooldownUntil = null;
     endpoint.totalSuccesses += 1;
-    endpoint.lastSuccessAt = new Date().toISOString();
+    endpoint.lastSuccessAt = new Date(now).toISOString();
 
     if (latencyMs > 0) {
-      endpoint.latencySamples.push(latencyMs);
-      if (endpoint.latencySamples.length > 20) {
+      endpoint.latencySamples.push({ timestamp: now, latencyMs });
+      // Keep 1-minute rolling window samples (older than 60s pruned)
+      endpoint.latencySamples = endpoint.latencySamples.filter(
+        (s) => typeof s === 'object' ? (now - s.timestamp <= 60000) : true
+      );
+      if (endpoint.latencySamples.length > 50) {
         endpoint.latencySamples.shift();
       }
       endpoint.latencyMs = latencyMs;
+      const values = endpoint.latencySamples.map((s) => typeof s === 'object' ? s.latencyMs : s);
       endpoint.avgLatencyMs = Math.round(
-        endpoint.latencySamples.reduce((a, b) => a + b, 0) / endpoint.latencySamples.length,
+        values.reduce((a, b) => a + b, 0) / values.length,
       );
     }
     const totalCalls = endpoint.totalSuccesses + endpoint.totalFailures;

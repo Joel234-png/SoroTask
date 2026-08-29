@@ -96,12 +96,12 @@ function createApp(zkService, options = {}) {
   app.use(express.json({ limit: '1mb' }));
 
   // ---------------------------------------------------------------------------
-  // Rate limiting – /generate-proof: 15 requests per minute per IP address.
+  // Rate limiting – /generate-proof: 10 requests per minute per IP address.
   // On breach: HTTP 429 Too Many Requests + Retry-After header.
   // ---------------------------------------------------------------------------
   const generateProofLimiter = rateLimit({
     windowMs: 60 * 1000, // 1-minute sliding window
-    max: 15,             // 15 proof requests per window per IP
+    max: 10,             // 10 proof requests per window per IP
     standardHeaders: true,  // Emit RateLimit-* headers (draft-6)
     legacyHeaders: false,
     store: createRateLimitStore(options.rateLimitStore),
