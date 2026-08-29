@@ -38,6 +38,45 @@ const problem = (res, status, title, detail, errors) => res.status(status).type(
 function createApp(zkService, options = {}) {
   const app = express();
   const apiToken = options.apiToken ?? process.env.ZK_PROOF_API_TOKEN;
+  const version = options.version ?? SERVICE_VERSION;
+  const startTime = options.startTime ?? Date.now();
+  const eciesPrivateKey = options.eciesPrivateKey ?? process.env.ECIES_PRIVATE_KEY;
+
+  // halo2 proving gateway (Issue #851). Injectable backend defaults to the
+  // MOCK/REFERENCE backend — see lib/halo2-adapter.js for the honesty notice on
+  // why no real halo2 proving happens in this build.
+  const halo2Adapter = options.halo2Adapter ?? new Halo2ProverAdapter();
+
+  // Prover backend selection (Issue #850). Defaults to the CPU path with zero
+  // behaviour change. If PROVER_BACKEND is explicitly set to cuda|metal with no
+  // real GPU backend wired in, selectProverBackend() throws here so a
+  // misconfigured deployment fails fast at startup instead of silently running
+  // on CPU while believing it is GPU-accelerated.
+  const proverBackend = options.proverBackend ?? selectProverBackend({ gpuBackends: options.gpuBackends });
+
+  app.use(express.json({ limit: '1mb' }));
+
+  // ---------------------------------------------------------------------------
+  // Rate limiting – /generate-proof: 10 requests per minute per IP address.
+  // On breach: HTTP 429 Too Many Requests + Retry-After header.
+  // ---------------------------------------------------------------------------
+  const generateProofLimiter = rateLimit({
+    windowMs: 60 * 1000, // 1-minute sliding window
+    max: 10,             // 10 proof requests per window per IP
+    standardHeaders: true,  // Emit RateLimit-* headers (draft-6)
+    legacyHeaders: false,
+    store: createRateLimitStore(options.rateLimitStore),
+    keyGenerator: (req) => req.ip,
+    handler: (_req, res) => {
+      const retryAfter = Math.ceil(60); // seconds until window resets
+      res.setHeader('Retry-After', retryAfter);
+      sendError(
+        res,
+        429,
+        'RATE_LIMIT_EXCEEDED',
+        'Too many proof requests. Please retry after ' + retryAfter + ' seconds.',
+      );
+    },
   app.use(express.json({ limit: '1mb', strict: true }));
   app.use(middleware({
     apiSpec: options.apiSpec || path.join(__dirname, 'openapi.yaml'),
