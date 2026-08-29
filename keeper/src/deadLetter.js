@@ -3,6 +3,7 @@ const path = require('path');
 const EventEmitter = require('events');
 const { createLogger } = require('./logger');
 const { ErrorClassification, calculateDelay } = require('./retry');
+const { safeFetch } = require('./ssrfGuard');
 
 const DATA_DIR = path.join(__dirname, '..', 'data');
 const DEAD_LETTER_FILE = path.join(DATA_DIR, 'dead-letter-queue.json');
@@ -379,7 +380,9 @@ class DeadLetterQueue extends EventEmitter {
       const controller = new AbortController();
       const timeoutId = setTimeout(() => controller.abort(), this.config.webhookTimeoutMs);
       
-      const response = await fetch(this.config.webhookUrl, {
+      // SSRF filter (Issue #1056): webhookUrl is operator-configured but
+      // still reaches the network from inside the perimeter.
+      const response = await safeFetch(this.config.webhookUrl, {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',
