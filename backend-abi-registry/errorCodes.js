@@ -72,6 +72,11 @@ const ERROR_CODES = {
   505: { name: 'FlashSwapFailed', category: 'Treasury', message: 'Flash swap callback execution failed' },
   506: { name: 'InsufficientFlashProfit', category: 'Treasury', message: 'Flash swap did not generate required minimum profit' },
   507: { name: 'InvalidSlippage', category: 'Treasury', message: 'Slippage parameter exceeds maximum allowed tolerance' },
+
+  // ── 600..699: Volatility & Circuit Breakers ──────────────────────────────────
+  600: { name: 'VolatilityExceeded', category: 'Volatility', message: 'Asset volatility exceeds allowed tolerance limit' },
+  601: { name: 'VolatilityCircuitBreakerTripped', category: 'Volatility', message: 'Volatility circuit breaker tripped; execution paused' },
+  602: { name: 'VolatilityTimelockActive', category: 'Volatility', message: 'Volatility timelock is active; cannot execute until window expires' },
 };
 
 /**

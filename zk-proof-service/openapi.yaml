@@ -32,6 +32,30 @@ paths:
         '400': { $ref: '#/components/responses/BadRequest' }
         '401': { $ref: '#/components/responses/Unauthorized' }
         '503': { $ref: '#/components/responses/ServiceUnavailable' }
+  /generate-proof/plonk:
+    post:
+      operationId: generateProofPlonk
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+      responses:
+        '200': { description: PLONK proof generated }
+        '400': { $ref: '#/components/responses/BadRequest' }
+  /verify-proof/plonk:
+    post:
+      operationId: verifyProofPlonk
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+      responses:
+        '200': { description: PLONK proof verified }
+        '400': { $ref: '#/components/responses/BadRequest' }
   /health:
     get:
       operationId: health
