@@ -160,6 +160,14 @@ pub struct DelegationPoolEvent {
     pub timestamp: u64,
 }
 
+/// Event payload for user fee discount tier progression
+#[contracttype]
+#[derive(Clone, Debug)]
+pub struct FeeDiscountTierUpdatedEvent {
+    pub creator: Address,
+    pub old_tier: u32,
+    pub new_tier: u32,
+    pub total_executions: u64,
 /// Event payload for oracle volatility breaches
 #[contracttype]
 #[derive(Clone, Debug)]
@@ -182,6 +190,30 @@ pub struct VolatilityCircuitBreakerUnpausedEvent {
 pub struct EventLogger;
 
 impl EventLogger {
+    /// Logs a user fee discount tier update
+    pub fn log_fee_discount_tier_updated(
+        env: &Env,
+        creator: Address,
+        old_tier: u32,
+        new_tier: u32,
+        total_executions: u64,
+    ) {
+        let timestamp = env.ledger().timestamp();
+        let event_data = FeeDiscountTierUpdatedEvent {
+            creator: creator.clone(),
+            old_tier,
+            new_tier,
+            total_executions,
+            timestamp,
+        };
+
+        let topics = (
+            Symbol::new(env, "sorotask"),
+            Symbol::new(env, "fee_discount_tier"),
+            creator,
+        );
+        env.events().publish(topics, event_data);
+    }
     /// Logs a state change for off-chain indexers
     pub fn log_state_change(
         env: &Env,
