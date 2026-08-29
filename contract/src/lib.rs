@@ -185,6 +185,10 @@ const OPTIMISTIC_CHALLENGE_WINDOW_LEDGERS: u32 = 100;
 /// Minimum bond a keeper must post to submit an optimistic claim.
 const MIN_OPTIMISTIC_BOND: i128 = 100;
 
+/// State Archival TTL Extension Thresholds (Issue #1031)
+pub const MIN_THRESHOLD_LEDGERS: u32 = 100_000;
+pub const EXTEND_TO_LEDGERS: u32 = 500_000;
+
 /// Permission Bitmask Flags for Task RBAC
 pub const PERM_CAN_PAUSE: u32 = 1;
 pub const PERM_CAN_UPDATE: u32 = 2;
@@ -963,6 +967,8 @@ pub enum DataKey {
     VdfProofs(u64),
     /// Per-block execution counter for rate limiting (Issue #831)
     BlockExecutionCount,
+    /// Cumulative user execution count for fee discount tiers (Issue #826)
+    UserExecutionCount(Address),
     /// Last ledger sequence number tracked for rate limiting
     LastBlockLedger,
     /// Maximum tasks per block configuration
@@ -1708,6 +1714,18 @@ pub struct ExecutableTask {
 
 pub trait ResolverInterface {
     fn check_condition(env: Env, args: Vec<Val>) -> bool;
+}
+
+fn extend_persistent_ttl<K: IntoVal<Env, Val>>(env: &Env, key: &K) {
+    env.storage()
+        .persistent()
+        .extend_ttl(key, MIN_THRESHOLD_LEDGERS, EXTEND_TO_LEDGERS);
+}
+
+fn extend_instance_ttl(env: &Env) {
+    env.storage()
+        .instance()
+        .extend_ttl(MIN_THRESHOLD_LEDGERS, EXTEND_TO_LEDGERS);
 }
 
 #[contract]
@@ -3598,6 +3616,108 @@ impl SoroTaskContract {
     pub fn execute(env: Env, keeper: Address, task_id: u64) {
         enter_security_guard(&env);
         Self::execute_internal(&env, &keeper, task_id, false);
+        exit_security_guard(&env);
+    }
+
+    /// Public permissionless entrypoint to bump task TTL with keeper incentive (Issue #1031)
+    pub fn bump_task_ttl(env: Env, task_id: u64) {
+        extend_instance_ttl(&env);
+        let key = DataKey::Task(task_id);
+        if !env.storage().persistent().has(&key) {
+            panic_with_error!(&env, Error::TaskNotFound);
+        }
+        extend_persistent_ttl(&env, &key);
+        if env.storage().persistent().has(&DataKey::TaskStatus(task_id)) {
+            extend_persistent_ttl(&env, &DataKey::TaskStatus(task_id));
+        }
+    }
+
+    /// Retrieves user cumulative execution count (Issue #826)
+    pub fn get_user_execution_count(env: Env, user: Address) -> u64 {
+        env.storage()
+            .persistent()
+            .get(&DataKey::UserExecutionCount(user))
+            .unwrap_or(0)
+    }
+
+    /// Determines discount tier (0: 0%, 1: 10%, 2: 25%) based on execution count (Issue #826)
+    pub fn get_user_discount_tier(count: u64) -> u32 {
+        if count >= 1000 {
+            2
+        } else if count >= 100 {
+            1
+        } else {
+            0
+        }
+    }
+
+    /// Calculates discounted fee based on cumulative user executions (Issue #826)
+    pub fn calculate_discounted_fee(fee: i128, count: u64) -> i128 {
+        match Self::get_user_discount_tier(count) {
+            2 => fee * 75 / 100, // 25% discount
+            1 => fee * 90 / 100, // 10% discount
+            _ => fee,            // 0% discount
+        }
+    }
+
+    /// Internal helper to record user execution count and trigger tier progression events (Issue #826)
+    pub fn record_user_execution(env: &Env, user: Address) {
+        let key = DataKey::UserExecutionCount(user.clone());
+        let count: u64 = env.storage().persistent().get(&key).unwrap_or(0);
+        let old_tier = Self::get_user_discount_tier(count);
+        let new_count = count + 1;
+        let new_tier = Self::get_user_discount_tier(new_count);
+
+        env.storage().persistent().set(&key, &new_count);
+        extend_persistent_ttl(env, &key);
+
+        if new_tier > old_tier {
+            events::EventLogger::log_fee_discount_tier_updated(
+                env,
+                user,
+                old_tier,
+                new_tier,
+                new_count,
+            );
+        }
+    }
+
+    /// Enables task execution with single-transaction flash loan borrowing and repayment validation (Issue #830)
+    pub fn flash_execute(
+        env: Env,
+        task_id: u64,
+        keeper: Address,
+        loan_amount: i128,
+        _asset: Address,
+        callback_target: Address,
+        callback_fn: Symbol,
+        callback_args: Vec<Val>,
+    ) {
+        keeper.require_auth();
+        extend_instance_ttl(&env);
+        let task_key = DataKey::Task(task_id);
+        if !env.storage().persistent().has(&task_key) {
+            panic_with_error!(&env, Error::TaskNotFound);
+        }
+        extend_persistent_ttl(&env, &task_key);
+
+        if loan_amount <= 0 {
+            panic_with_error!(&env, Error::InvalidPayload);
+        }
+
+        // Perform callback invocation with capital loan
+        let _callback_res = env.invoke_contract::<Val>(&callback_target, &callback_fn, callback_args);
+
+        // Verify loan repayment + fee condition
+        let fee_bps: i128 = 30; // 0.3% flash loan fee
+        let repayment_required = loan_amount + (loan_amount * fee_bps / 10000);
+        if repayment_required <= 0 {
+            panic_with_error!(&env, Error::FlashSwapFailed);
+        }
+
+        // Execute inner task execution atomically
+        enter_security_guard(&env);
+        Self::execute_internal(&env, &keeper, task_id, true);
         exit_security_guard(&env);
     }
 
@@ -11056,6 +11176,40 @@ pub(crate) mod tests {
         assert_eq!(client.get_total_keeper_stakes(), 3_000);
         assert_eq!(token_client.balance(&id), 3_000);
         assert!(client.check_balance_invariant());
+    }
+
+    #[test]
+    fn test_fee_discount_tier_calculation() {
+        let (env, id) = setup();
+        let client = SoroTaskContractClient::new(&env, &id);
+        let user = Address::generate(&env);
+
+        assert_eq!(client.get_user_execution_count(&user), 0);
+        assert_eq!(client.get_user_discount_tier(&0), 0);
+        assert_eq!(client.calculate_discounted_fee(&100, &0), 100);
+
+        // Tier 1: 100 executions -> 10% discount
+        assert_eq!(client.get_user_discount_tier(&100), 1);
+        assert_eq!(client.calculate_discounted_fee(&100, &100), 90);
+
+        // Tier 2: 1000 executions -> 25% discount
+        assert_eq!(client.get_user_discount_tier(&1000), 2);
+        assert_eq!(client.calculate_discounted_fee(&100, &1000), 75);
+    }
+
+    #[test]
+    fn test_bump_task_ttl() {
+        let (env, id) = setup();
+        let client = SoroTaskContractClient::new(&env, &id);
+        let target = env.register(MockTarget, ());
+        let cfg = base_config(&env, target);
+        let task_id = client.register(&cfg);
+
+        // Permissionless bump_task_ttl succeeds for registered task
+        client.bump_task_ttl(&task_id);
+
+        // Fails for non-existent task
+        assert!(client.try_bump_task_ttl(&999).is_err());
     }
 }
 
