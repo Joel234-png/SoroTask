@@ -237,6 +237,7 @@ class MPCThresholdContext {
 class ZKProofService extends EventEmitter {
   /**
    * Initialize the service with a specific number of workers.
+   */
   constructor(workerCount = CPU_CONCURRENCY, options = {}) {
     super();
     this.workerCount = workerCount;
@@ -295,13 +296,24 @@ class ZKProofService extends EventEmitter {
   }
 
   initialize() {
-    this.workers = Array.from({ length: this.workerCount }, (_, id) => ({ id, status: 'idle' }));
     this.isReady = true;
     this.startedAt = Date.now();
     this.workers = [];
     for (let i = 0; i < this.workerCount; i++) {
       this._spawnWorker(i);
     }
+  }
+
+  /**
+   * Acquire an idle worker entry for a proof job, marking it active.
+   * Returns null when the pool is at capacity.
+   * @returns {{ id: number, status: string, worker: Worker, job: object|null } | null}
+   */
+  _acquireWorker() {
+    const entry = this.workers.find((candidate) => candidate.status === 'idle');
+    if (!entry) return null;
+    entry.status = 'active';
+    return entry;
   }
 
   _spawnWorker(id) {
@@ -416,12 +428,6 @@ class ZKProofService extends EventEmitter {
       })
       .catch(() => {});
     return proofPromise;
-    try {
-      await new Promise((resolve) => setTimeout(resolve, 0));
-      return { proofId: crypto.randomUUID(), pi_a: ['0x1', '0x2'], pi_b: [['0x3', '0x4'], ['0x5', '0x6']], pi_c: ['0x7', '0x8'], publicSignals: ['0x9'] };
-    } finally {
-      worker.status = 'idle';
-    }
   }
 
   async verifyProof({ taskCondition, proof, conditionHash, circuitId }) {
@@ -475,49 +481,21 @@ class ZKProofService extends EventEmitter {
 
     this.asyncJobs.set(jobId, job);
 
-    // Asynchronously process proof generation within an ephemeral directory
-    setImmediate(async () => {
-      try {
-        job.status = 'processing';
-        job.progress = 25;
-        this.emit('jobProgress', { jobId, status: job.status, progress: job.progress });
-
-        // Use ephemeral directory for proof generation to ensure temp files are cleaned up
-        await withEphemeralDir(async (ephemeralDir) => {
-          await writeFile(ephemeralDir, 'witness.json', JSON.stringify(clientData));
-          await writeFile(ephemeralDir, 'taskCondition.json', JSON.stringify(taskCondition));
-
-          job.progress = 50;
-          this.emit('jobProgress', { jobId, status: job.status, progress: job.progress });
-
-          const rawProof = await this.generateProof(taskCondition, clientData);
-          const conditionHash = hashTaskCondition(taskCondition);
-
-          job.progress = 100;
-          job.status = 'completed';
-          job.result = {
-            proofId: rawProof.proofId,
-            status: 'success',
-            conditionHash,
-            proof: {
-              pi_a: rawProof.pi_a,
-              pi_b: rawProof.pi_b,
-              pi_c: rawProof.pi_c,
-              publicSignals: rawProof.publicSignals,
-            },
-            generatedAt: new Date().toISOString(),
-          };
-        });
-
-        this.emit('jobComplete', job);
-      } catch (err) {
-        job.status = 'failed';
-        job.error = err.message;
-        this.emit('jobError', job);
-      }
-    this.proverQueue.add(jobId, { taskCondition, clientData, circuitId, circuitArtifactHash }).catch((error) => {
-      this.proverQueue.onError(jobId, error);
-    });
+    // Process the job through the prover queue (BullMQ when Redis is
+    // configured, in-process worker pool otherwise). Progress and completion
+    // are surfaced via the jobProgress / jobComplete / jobError events that
+    // the SSE stream endpoint subscribes to. No inline processing here so each
+    // job is generated exactly once.
+    this.proverQueue
+      .add(jobId, { taskCondition, clientData, circuitId, circuitArtifactHash })
+      .catch((error) => {
+        const failed = this.asyncJobs.get(jobId);
+        if (failed) {
+          failed.status = 'failed';
+          failed.error = error.message;
+          this.emit('jobError', failed);
+        }
+      });
 
     return {
       jobId,
