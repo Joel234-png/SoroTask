@@ -85,7 +85,9 @@ pub enum Error {
     DecryptionFailed = 55,
     InsufficientDelegation = 56,
     InvalidCommissionRate = 57,
-    InvalidVdfProof = 58,
+    VolatilityExceeded = 62,
+    VolatilityCircuitBreakerTripped = 63,
+    VolatilityTimelockActive = 64,
 }
 
 #[contracttype]
@@ -802,23 +804,6 @@ pub struct ZkRangeProof {
 
 #[contracttype]
 #[derive(Clone, Debug)]
-/// A VDF proof for a Wesolowski-style time-lock delay (Issue #837).
-/// SCAFFOLD: verify_vdf_proof below is a stub (always returns false) until
-/// the group arithmetic (RSA/class-group modexp + Fiat-Shamir challenge,
-/// wasm32-compatible bignum) is implemented. Do not treat as a working
-/// security gate yet.
-pub struct VdfProof {
-    pub task_id: u64,
-    pub input: Bytes,
-    pub output: Bytes,
-    pub proof: Bytes,
-    pub difficulty: u64,
-    pub is_verified: bool,
-    pub created_at: u64,
-}
-
-#[contracttype]
-#[derive(Clone, Debug)]
 pub struct DynamicBountyConfig {
     pub enabled: bool,
     pub base_bounty: i128,
@@ -965,6 +950,10 @@ pub enum DataKey {
     ZkRangeProofCounter,
     TaskDynamicBounty(u64),
     FlashSwapRecord(u64),
+    MaxVolatilityBps,
+    LastOraclePrice,
+    VolatilityCircuitBreakerTripped,
+    VolatilityUnpauseTimelock,
     FlashSwapCounter,
     KeeperRandomSeed,
     InsuranceVaultBalance,
@@ -2129,6 +2118,75 @@ impl SoroTaskContract {
         enter_security_guard(&env);
         Self::pause_task_internal(&env, task_id, false);
         exit_security_guard(&env);
+    }
+
+    /// Sets the maximum allowable single-update oracle price volatility threshold in basis points (bps).
+    pub fn set_max_volatility_bps(env: Env, admin: Address, max_bps: u32) {
+        admin.require_auth();
+        env.storage().instance().set(&DataKey::MaxVolatilityBps, &max_bps);
+    }
+
+    /// Returns the maximum volatility threshold in bps (default: 500 = 5%).
+    pub fn get_max_volatility_bps(env: &Env) -> u32 {
+        env.storage().instance().get(&DataKey::MaxVolatilityBps).unwrap_or(500)
+    }
+
+    /// Checks if the volatility circuit breaker is currently tripped.
+    pub fn is_volatility_circuit_tripped(env: &Env) -> bool {
+        env.storage().instance().get(&DataKey::VolatilityCircuitBreakerTripped).unwrap_or(false)
+    }
+
+    /// Updates oracle price, checking single-update price delta against max_volatility_bps.
+    /// Trips circuit breaker and returns Ok(true) if volatility exceeds threshold, Ok(false) if updated normally.
+    pub fn check_oracle_volatility(env: Env, new_price: i128) -> Result<bool, Error> {
+        enter_security_guard(&env);
+        if Self::is_volatility_circuit_tripped(&env) {
+            exit_security_guard(&env);
+            return Err(Error::VolatilityCircuitBreakerTripped);
+        }
+
+        let max_volatility = Self::get_max_volatility_bps(&env);
+        if let Some(last_price) = env.storage().instance().get::<DataKey, i128>(&DataKey::LastOraclePrice) {
+            if last_price > 0 {
+                let diff = if new_price > last_price {
+                    new_price - last_price
+                } else {
+                    last_price - new_price
+                };
+                let volatility_bps = ((diff as u128 * 10_000) / last_price as u128) as u32;
+                if volatility_bps > max_volatility {
+                    env.storage().instance().set(&DataKey::VolatilityCircuitBreakerTripped, &true);
+                    let current_time = env.ledger().timestamp();
+                    env.storage().instance().set(&DataKey::VolatilityUnpauseTimelock, &(current_time + 3_600));
+                    crate::events::EventLogger::log_oracle_volatility_breach(
+                        &env,
+                        last_price,
+                        new_price,
+                        volatility_bps,
+                        max_volatility,
+                    );
+                    exit_security_guard(&env);
+                    return Ok(true);
+                }
+            }
+        }
+
+        env.storage().instance().set(&DataKey::LastOraclePrice, &new_price);
+        exit_security_guard(&env);
+        Ok(false)
+    }
+
+    /// Unpauses the volatility circuit breaker after timelock expiration.
+    pub fn unpause_volatility_breaker(env: Env, admin: Address) -> Result<(), Error> {
+        admin.require_auth();
+        if let Some(timelock) = env.storage().instance().get::<DataKey, u64>(&DataKey::VolatilityUnpauseTimelock) {
+            if env.ledger().timestamp() < timelock {
+                return Err(Error::VolatilityTimelockActive);
+            }
+        }
+        env.storage().instance().set(&DataKey::VolatilityCircuitBreakerTripped, &false);
+        crate::events::EventLogger::log_volatility_circuit_breaker_unpaused(&env, admin);
+        Ok(())
     }
 
     /// Requests randomness from the VRF oracle for a task.
