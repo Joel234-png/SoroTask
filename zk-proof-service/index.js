@@ -237,13 +237,8 @@ class MPCThresholdContext {
 class ZKProofService extends EventEmitter {
   /**
    * Initialize the service with a specific number of workers.
-   * @param {number} workerCount - Number of workers in the pool.
-   */
   constructor(workerCount = CPU_CONCURRENCY, options = {}) {
     super();
-
-class ZKProofService {
-  constructor(workerCount = 4) {
     this.workerCount = workerCount;
     this.workerMemoryMb = options.workerMemoryMb ?? 4096;
     this.workerTimeoutMs = options.workerTimeoutMs ?? 60000;
@@ -367,14 +362,6 @@ class ZKProofService {
     return { totalWorkers: this.workers.length, activeWorkers, idleWorkers: this.workers.length - activeWorkers };
   }
 
-  async generateProof(taskCondition, clientData) {
-    if (!this.isReady) throw new Error('Service not initialized');
-    const worker = this.workers.find((entry) => entry.status === 'idle');
-    if (!worker) throw new Error('Worker pool at capacity');
-    worker.status = 'active';
-    return worker;
-  }
-
   /**
    * @param {{ id: number }} worker
    */
@@ -471,8 +458,6 @@ class ZKProofService {
    * @param {Object} clientData
    * @param {Object} [options]
    * @returns {Object} Job info containing jobId, status, createdAt.
-   */
-  enqueueAsyncJob(taskCondition, clientData, options = {}) {
   enqueueAsyncJob(taskCondition, clientData, circuitId = 'default', circuitArtifactHash = '') {
     if (!this.isReady) {
       throw new Error('Service not initialized');
@@ -568,8 +553,6 @@ class ZKProofService {
     this.inFlightProofs.clear();
     this.proverQueue.close().catch(() => {});
     this.proofCache.close().catch(() => {});
-    if (!this.isReady) throw new Error('Service not initialized');
-    return { valid: true, proofId: proof.proofId, conditionHash: conditionHash || JSON.stringify(taskCondition), verificationDetails: { circuitId, publicSignalsMatch: true, conditionHashMatch: true } };
   }
 }
 

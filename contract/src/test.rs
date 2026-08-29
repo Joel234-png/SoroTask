@@ -18,6 +18,7 @@ fn create_sample_task_config(env: &Env, creator: &Address, target: &Address) -> 
         is_active: true,
         blocked_by: vec![env],
         yield_strategy: None,
+        permissions: 0,
     }
 }
 
@@ -101,3 +102,35 @@ fn test_bounty_inflation_protection() {
     let is_healthy = client.check_bounty_escrow_health(&task_id, &500);
     assert!(is_healthy);
 }
+
+#[test]
+fn test_oracle_volatility_circuit_breaker() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let contract_id = env.register(SoroTaskContract, ());
+    let client = SoroTaskContractClient::new(&env, &contract_id);
+    let admin = Address::generate(&env);
+
+    client.set_max_volatility_bps(&admin, &500); // 5% max volatility
+    assert_eq!(client.get_max_volatility_bps(), 500);
+
+    // First price update (100) sets initial price
+    let tripped1 = client.check_oracle_volatility(&100_000);
+    assert!(!tripped1);
+    assert!(!client.is_volatility_circuit_tripped());
+
+    // Small price update (102 = +2%) is within threshold
+    let tripped2 = client.check_oracle_volatility(&102_000);
+    assert!(!tripped2);
+    assert!(!client.is_volatility_circuit_tripped());
+
+    // Huge price update (120 = +17.6%) exceeds 5% threshold
+    let tripped3 = client.check_oracle_volatility(&120_000);
+    assert!(tripped3);
+    assert!(client.is_volatility_circuit_tripped());
+
+    // Subsequent calls while tripped fail with VolatilityCircuitBreakerTripped error
+    let res = client.try_check_oracle_volatility(&121_000);
+    assert!(res.is_err());
+}
+
