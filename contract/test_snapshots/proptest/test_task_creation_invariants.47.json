@@ -54,7 +54,7 @@
                         "symbol": "gas_balance"
                       },
                       "val": {
-                        "i128": "4592812"
+                        "i128": "8052375"
                       }
                     },
                     {
@@ -62,7 +62,7 @@
                         "symbol": "interval"
                       },
                       "val": {
-                        "u32": 91560948
+                        "u32": 69997302
                       }
                     },
                     {
@@ -79,6 +79,14 @@
                       },
                       "val": {
                         "u64": "0"
+                      }
+                    },
+                    {
+                      "key": {
+                        "symbol": "permissions"
+                      },
+                      "val": {
+                        "u32": 15
                       }
                     },
                     {
@@ -239,7 +247,7 @@
                       "symbol": "gas_balance"
                     },
                     "val": {
-                      "i128": "4592812"
+                      "i128": "8052375"
                     }
                   },
                   {
@@ -247,7 +255,7 @@
                       "symbol": "interval"
                     },
                     "val": {
-                      "u32": 91560948
+                      "u32": 69997302
                     }
                   },
                   {
@@ -264,6 +272,14 @@
                     },
                     "val": {
                       "u64": "0"
+                    }
+                  },
+                  {
+                    "key": {
+                      "symbol": "permissions"
+                    },
+                    "val": {
+                      "u32": 15
                     }
                   },
                   {
@@ -315,7 +331,7 @@
                     "symbol": "TaskFingerprint"
                   },
                   {
-                    "bytes": "cce16b8f65187b6b2f9e4439507fb4770104062a0a5a2351bdd40d7d9231457f"
+                    "bytes": "6df529da0b291a247813e5d541cdccc52a7fc6b8eb9125288a43d6cb6480a4d0"
                   }
                 ]
               },
@@ -399,7 +415,7 @@
                   "executable": {
                     "wasm": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
                   },
-                  "storage": null
+                  "storage": []
                 }
               }
             }

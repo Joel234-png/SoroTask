@@ -84,6 +84,14 @@
                     },
                     {
                       "key": {
+                        "symbol": "permissions"
+                      },
+                      "val": {
+                        "u32": 15
+                      }
+                    },
+                    {
+                      "key": {
                         "symbol": "resolver"
                       },
                       "val": "void"
@@ -196,6 +204,14 @@
                     },
                     {
                       "key": {
+                        "symbol": "permissions"
+                      },
+                      "val": {
+                        "u32": 15
+                      }
+                    },
+                    {
+                      "key": {
                         "symbol": "resolver"
                       },
                       "val": "void"
@@ -304,6 +320,14 @@
                       },
                       "val": {
                         "u64": "0"
+                      }
+                    },
+                    {
+                      "key": {
+                        "symbol": "permissions"
+                      },
+                      "val": {
+                        "u32": 15
                       }
                     },
                     {
@@ -498,6 +522,14 @@
                   },
                   {
                     "key": {
+                      "symbol": "permissions"
+                    },
+                    "val": {
+                      "u32": 15
+                    }
+                  },
+                  {
+                    "key": {
                       "symbol": "resolver"
                     },
                     "val": "void"
@@ -618,6 +650,14 @@
                   },
                   {
                     "key": {
+                      "symbol": "permissions"
+                    },
+                    "val": {
+                      "u32": 15
+                    }
+                  },
+                  {
+                    "key": {
                       "symbol": "resolver"
                     },
                     "val": "void"
@@ -734,6 +774,14 @@
                     },
                     "val": {
                       "u64": "0"
+                    }
+                  },
+                  {
+                    "key": {
+                      "symbol": "permissions"
+                    },
+                    "val": {
+                      "u32": 15
                     }
                   },
                   {
@@ -1035,7 +1083,7 @@
                   "executable": {
                     "wasm": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
                   },
-                  "storage": null
+                  "storage": []
                 }
               }
             }

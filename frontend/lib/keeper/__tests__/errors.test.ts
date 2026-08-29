@@ -253,7 +253,7 @@ describe('KeeperErrorHandler', () => {
       const error = createKeeperError(new Error('timeout'));
       const message = getErrorMessage(error);
 
-      expect(message).toContain('timeout');
+      expect(message).toContain('timed out');
     });
 
     it('should return unauthorized error message', () => {
@@ -271,7 +271,7 @@ describe('KeeperErrorHandler', () => {
       });
       const message = getErrorMessage(error);
 
-      expect(message).toContain('not found');
+      expect(message).toContain('could not be found');
     });
 
     it('should include custom message for validation errors', () => {

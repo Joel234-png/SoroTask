@@ -43,11 +43,12 @@ export function createKeeperError(
     originalError = error;
     errorMessage = error.message;
 
+    const msgLower = error.message.toLowerCase();
     // Check for specific error types
-    if (error.message.includes('timeout') || error.message.includes('ECONNABORTED')) {
+    if (msgLower.includes('timeout') || error.message.includes('ECONNABORTED')) {
       type = KeeperErrorType.TIMEOUT_ERROR;
       retriable = true;
-    } else if (error.message.includes('network') || error.message.includes('ENOTFOUND')) {
+    } else if (msgLower.includes('network') || error.message.includes('ENOTFOUND')) {
       type = KeeperErrorType.NETWORK_ERROR;
       retriable = true;
     }
@@ -230,9 +231,8 @@ export function sanitizeKeeperData(keeper: Partial<Keeper>): Partial<Keeper> {
 
   // Ensure dates are valid
   if (sanitized.lastHeartbeat && typeof sanitized.lastHeartbeat === 'string') {
-    try {
-      new Date(sanitized.lastHeartbeat);
-    } catch {
+    const d = new Date(sanitized.lastHeartbeat);
+    if (isNaN(d.getTime())) {
       delete sanitized.lastHeartbeat;
     }
   }

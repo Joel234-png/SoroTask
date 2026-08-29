@@ -1,6 +1,6 @@
 import React from 'react';
 import { useStellarWallet } from '../context/StellarWalletContext';
-import { WalletNetwork } from '@stellar/wallet-kit';
+import { WalletNetwork } from '@/context/StellarWalletContext';
 
 export const WalletConnectionHub: React.FC = () => {
   const {

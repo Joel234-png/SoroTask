@@ -127,6 +127,14 @@
                     },
                     {
                       "key": {
+                        "symbol": "permissions"
+                      },
+                      "val": {
+                        "u32": 15
+                      }
+                    },
+                    {
+                      "key": {
                         "symbol": "resolver"
                       },
                       "val": "void"
@@ -973,6 +981,14 @@
                   },
                   {
                     "key": {
+                      "symbol": "permissions"
+                    },
+                    "val": {
+                      "u32": 15
+                    }
+                  },
+                  {
+                    "key": {
                       "symbol": "resolver"
                     },
                     "val": "void"
@@ -1005,7 +1021,7 @@
           },
           "ext": "v0"
         },
-        "live_until": 4095
+        "live_until": 100000
       },
       {
         "entry": {
@@ -1105,6 +1121,18 @@
                     "wasm": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
                   },
                   "storage": [
+                    {
+                      "key": {
+                        "vec": [
+                          {
+                            "symbol": "BlockExecutionCount"
+                          }
+                        ]
+                      },
+                      "val": {
+                        "u32": 1
+                      }
+                    },
                     {
                       "key": {
                         "vec": [

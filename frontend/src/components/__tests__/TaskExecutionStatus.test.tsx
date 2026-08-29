@@ -57,7 +57,7 @@ describe('TaskExecutionStatus Component', () => {
         completedAt: '2026-06-02T10:00:10.000Z',
       };
       render(<TaskExecutionStatus execution={completedState} />);
-      expect(screen.getByText('Completed')).toBeInTheDocument();
+      expect(screen.getAllByText('Completed').length).toBeGreaterThan(0);
     });
 
     it('should render failed status with error details', () => {
@@ -88,7 +88,7 @@ describe('TaskExecutionStatus Component', () => {
         completedAt: '2026-06-02T10:00:10.000Z',
       };
       render(<TaskExecutionStatus execution={completedState} />);
-      expect(screen.getByText('Completed')).toBeInTheDocument();
+      expect(screen.getAllByText('Completed').length).toBeGreaterThan(0);
     });
 
     it('should display dash when no completed time', () => {
@@ -179,7 +179,7 @@ describe('TaskExecutionStatus Component', () => {
 
       expect(screen.getByText('Error')).toBeInTheDocument();
       expect(screen.getByText('Invalid task input')).toBeInTheDocument();
-      expect(screen.getByText('VALIDATION_ERROR')).toBeInTheDocument();
+      expect(screen.getByText(/VALIDATION_ERROR/)).toBeInTheDocument();
     });
 
     it('should display error stack trace when available', () => {

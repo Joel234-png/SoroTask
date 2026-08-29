@@ -59,6 +59,8 @@ function loadConfig() {
     rpcFailoverFailureThreshold: parseInteger(process.env.RPC_FAILOVER_FAILURE_THRESHOLD, 3),
     rpcFailoverCooldownMs: parseInteger(process.env.RPC_FAILOVER_COOLDOWN_MS, 30000),
     rpcFailoverHealthCheckIntervalMs: parseInteger(process.env.RPC_FAILOVER_HEALTH_CHECK_INTERVAL_MS, 15000),
+    rpcFailoverMaxHealthyLedgerLag: parseInteger(process.env.RPC_FAILOVER_MAX_HEALTHY_LEDGER_LAG, 3),
+    rpcFailoverLatencyPenaltyThresholdMs: parseInteger(process.env.RPC_FAILOVER_LATENCY_PENALTY_THRESHOLD_MS, 1000),
     networkPassphrase: process.env.NETWORK_PASSPHRASE,
     keeperSecret: process.env.KEEPER_SECRET,
     contractId: process.env.CONTRACT_ID,
@@ -132,6 +134,8 @@ function loadConfig() {
       stalePeerMs: parseInteger(process.env.P2P_STALE_PEER_MS, 45000),
       authWindowMs: parseInteger(process.env.P2P_AUTH_WINDOW_MS, 30000),
       connectTimeoutMs: parseInteger(process.env.P2P_CONNECT_TIMEOUT_MS, 5000),
+      transport: process.env.P2P_TRANSPORT || 'socketio',
+      taskLockTtlMs: parseInteger(process.env.P2P_TASK_LOCK_TTL_MS, 60000),
     },
     // RPC Load Balancer Configuration
     rpcEndpoints: process.env.RPC_ENDPOINTS || null,
@@ -149,6 +153,13 @@ function loadConfig() {
     readBatchSize: parseInteger(process.env.READ_BATCH_SIZE, 50),
     batchConcurrency: parseInteger(process.env.BATCH_CONCURRENCY, 2),
     batchRps: parseInteger(process.env.BATCH_RPS, 10),
+    // Task metadata cache configuration
+    // LRU cache for task configurations with event-driven invalidation.
+    // Reduces redundant RPC state queries by caching task metadata in-memory
+    // and invalidating entries instantly when TaskUpdated events arrive.
+    taskCacheEnabled: parseBoolean(process.env.TASK_CACHE_ENABLED, true),
+    taskCacheTtlSeconds: parseInteger(process.env.TASK_CACHE_TTL_SECONDS, 60),
+    taskCacheMaxSize: parseInteger(process.env.TASK_CACHE_MAX_SIZE, 2000),
     realtimeStreamEnabled: parseBoolean(process.env.REALTIME_STREAM_ENABLED, true),
     realtimeStreamNamespace: process.env.REALTIME_STREAM_NAMESPACE || '/stream',
     apiGatewayEnabled: parseBoolean(process.env.API_GATEWAY_ENABLED, true),
@@ -163,7 +174,7 @@ function loadConfig() {
     // Inbound Webhooks
     inboundWebhooks: {
       enabled: parseBoolean(process.env.INBOUND_WEBHOOKS_ENABLED, false),
-      path: process.env.INBOUND_WEBHOOK_PATH || '/webhooks/task-executions',
+      path: process.env.INBOUND_WEBHOOK_PATH || '/webhook/trigger',
       secret: process.env.INBOUND_WEBHOOK_SECRETS || null,
       defaultKeyId: process.env.INBOUND_WEBHOOK_DEFAULT_KEY_ID || 'primary',
       toleranceMs: parseInteger(process.env.INBOUND_WEBHOOK_TOLERANCE_MS, 300000),
@@ -177,6 +188,15 @@ function loadConfig() {
       maxRetryDelaySeconds: parseInteger(process.env.SLO_MAX_RETRY_DELAY_SECONDS, 120),
       minExecutionSuccessRate: parseFloat(process.env.SLO_MIN_EXECUTION_SUCCESS_RATE) || 0.95,
       minPollSuccessRate: parseFloat(process.env.SLO_MIN_POLL_SUCCESS_RATE) || 0.99,
+    },
+    // Issue #1063 — Wallet balance monitoring thresholds
+    walletBalanceMonitor: {
+      enabled: parseBoolean(process.env.WALLET_BALANCE_MONITOR_ENABLED, true),
+      checkIntervalMs: parseInteger(process.env.WALLET_BALANCE_CHECK_INTERVAL_MS, 60000),
+      warningThreshold: parseFloat(process.env.WALLET_WARNING_THRESHOLD_XLM) || 50,
+      criticalThreshold: parseFloat(process.env.WALLET_CRITICAL_THRESHOLD_XLM) || 20,
+      sweepEnabled: parseBoolean(process.env.WALLET_SWEEP_ENABLED, false),
+      sweepTargetAmount: parseFloat(process.env.WALLET_SWEEP_TARGET_AMOUNT_XLM) || 100,
     },
   };
 

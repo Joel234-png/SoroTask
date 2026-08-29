@@ -58,6 +58,7 @@ describe("ExecutionQueue", () => {
   });
 
   it("marks action failed after max attempts", async () => {
+    jest.useFakeTimers();
     const handler: ExecutionQueueHandler = {
       execute: jest.fn().mockRejectedValue(new Error("boom")),
     };
@@ -69,8 +70,9 @@ describe("ExecutionQueue", () => {
       contractAddress: "C123",
       gasEstimate: 500,
     }, 10, true);
-    await new Promise((resolve) => setTimeout(resolve, 200));
+    await jest.advanceTimersByTimeAsync(DEFAULT_QUEUE_CONFIG.maxDelayMs * 10);
     expect(action.attempts).toBe(DEFAULT_QUEUE_CONFIG.maxAttempts);
+    jest.useRealTimers();
   });
 
   it("cancels a queued action", async () => {

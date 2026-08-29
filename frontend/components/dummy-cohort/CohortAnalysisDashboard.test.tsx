@@ -5,6 +5,7 @@ import * as Sentry from '@/src/lib/errors/sentry';
 
 jest.mock('@/src/lib/errors/sentry', () => ({
   captureException: jest.fn(),
+  captureSentryException: jest.fn(),
   addSentryBreadcrumb: jest.fn()
 }));
 
@@ -41,6 +42,6 @@ describe('CohortAnalysisDashboard', () => {
     await waitFor(() => {
       expect(screen.getByTestId('cohort-error')).toHaveTextContent('Fallback system activated: Unable to load cohort data securely.');
     });
-    expect(Sentry.captureException).toHaveBeenCalled();
+    expect(Sentry.captureSentryException).toHaveBeenCalled();
   });
 });

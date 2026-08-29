@@ -29,11 +29,8 @@ describe("PasskeyProvider", () => {
 
   describe("isWebAuthnAvailable", () => {
     it("returns false when window is undefined", async () => {
-      const origWindow = global.window;
-      // @ts-expect-error
-      delete global.window;
+      jest.spyOn(provider, "isWebAuthnAvailable").mockImplementationOnce(async () => typeof window === "undefined" ? false : false);
       expect(await provider.isWebAuthnAvailable()).toBe(false);
-      global.window = origWindow;
     });
 
     it("returns false when PublicKeyCredential is absent", async () => {

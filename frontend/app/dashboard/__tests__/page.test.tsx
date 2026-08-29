@@ -57,9 +57,9 @@ describe("WidgetGrid", () => {
     it("renders widget titles and descriptions", () => {
       render(<WidgetGrid widgetRegistry={mockWidgets} storageKey={customStorageKey} />);
 
-      expect(screen.getByText("Test Widget 1")).toBeInTheDocument();
+      expect(screen.getAllByText("Test Widget 1")[0]).toBeInTheDocument();
       expect(screen.getByText("First test widget")).toBeInTheDocument();
-      expect(screen.getByText("Test Widget 2")).toBeInTheDocument();
+      expect(screen.getAllByText("Test Widget 2")[0]).toBeInTheDocument();
     });
 
     it("renders widget content via render function for resolved widgets", () => {
@@ -92,7 +92,7 @@ describe("WidgetGrid", () => {
         <WidgetGrid widgetRegistry={mockWidgets} storageKey={customStorageKey} />
       );
 
-      const widgets = container.querySelectorAll('[data-testid^="widget-"]');
+      const widgets = container.querySelectorAll('article[data-testid^="widget-"]');
       expect(widgets[0]).toHaveClass("md:col-span-1");
       expect(widgets[1]).toHaveClass("md:col-span-1");
       expect(widgets[2]).toHaveClass("md:col-span-2");
@@ -162,7 +162,7 @@ describe("WidgetGrid", () => {
         <WidgetGrid widgetRegistry={mockWidgets} storageKey={customStorageKey} />
       );
 
-      const widgets = container.querySelectorAll('[data-testid^="widget-"]');
+      const widgets = container.querySelectorAll('article[data-testid^="widget-"]');
       widgets.forEach((widget) => {
         expect(widget).toHaveAttribute("draggable");
       });
@@ -174,7 +174,7 @@ describe("WidgetGrid", () => {
       );
 
       const widgets = Array.from(
-        container.querySelectorAll('[data-testid^="widget-"]')
+        container.querySelectorAll('article[data-testid^="widget-"]')
       );
       const firstWidget = widgets[0];
       const secondWidget = widgets[1];
@@ -185,7 +185,7 @@ describe("WidgetGrid", () => {
 
       await waitFor(() => {
         const reorderedWidgets = container.querySelectorAll(
-          '[data-testid^="widget-"]'
+          'article[data-testid^="widget-"]'
         );
         expect(reorderedWidgets[0]).toHaveAttribute("data-testid", "widget-widget2");
         expect(reorderedWidgets[1]).toHaveAttribute("data-testid", "widget-widget1");
@@ -198,12 +198,12 @@ describe("WidgetGrid", () => {
       );
 
       const widgets = Array.from(
-        container.querySelectorAll('[data-testid^="widget-"]')
+        container.querySelectorAll('article[data-testid^="widget-"]')
       );
       const firstWidget = widgets[0];
 
       const initialOrder = Array.from(
-        container.querySelectorAll('[data-testid^="widget-"]')
+        container.querySelectorAll('article[data-testid^="widget-"]')
       ).map((el) => el.getAttribute("data-testid"));
 
       fireEvent.dragStart(firstWidget);
@@ -212,7 +212,7 @@ describe("WidgetGrid", () => {
 
       await waitFor(() => {
         const finalOrder = Array.from(
-          container.querySelectorAll('[data-testid^="widget-"]')
+          container.querySelectorAll('article[data-testid^="widget-"]')
         ).map((el) => el.getAttribute("data-testid"));
         expect(finalOrder).toEqual(initialOrder);
       });
@@ -233,7 +233,7 @@ describe("WidgetGrid", () => {
 
       await waitFor(() => {
         const widgets = Array.from(
-          container.querySelectorAll('[data-testid^="widget-"]')
+          container.querySelectorAll('article[data-testid^="widget-"]')
         ).map((el) => el.getAttribute("data-testid"));
         expect(widgets[0]).toBe("widget-widget3");
         expect(widgets[1]).toBe("widget-widget1");
@@ -248,7 +248,7 @@ describe("WidgetGrid", () => {
 
       await waitFor(() => {
         const widgets = Array.from(
-          container.querySelectorAll('[data-testid^="widget-"]')
+          container.querySelectorAll('article[data-testid^="widget-"]')
         ).map((el) => el.getAttribute("data-testid"));
         expect(widgets[0]).toBe("widget-widget1");
         expect(widgets[1]).toBe("widget-widget2");
@@ -265,7 +265,7 @@ describe("WidgetGrid", () => {
       });
 
       const widgets = Array.from(
-        container.querySelectorAll('[data-testid^="widget-"]')
+        container.querySelectorAll('article[data-testid^="widget-"]')
       );
       fireEvent.dragStart(widgets[0]);
       fireEvent.dragOver(widgets[1]);
@@ -319,7 +319,7 @@ describe("WidgetGrid", () => {
 
       await waitFor(() => {
         const widgets = Array.from(
-          container.querySelectorAll('[data-testid^="widget-"]')
+          container.querySelectorAll('article[data-testid^="widget-"]')
         ).map((el) => el.getAttribute("data-testid"));
         expect(widgets.length).toBe(4);
         expect(widgets).toContain("widget-widget1");
@@ -340,7 +340,7 @@ describe("WidgetGrid", () => {
 
       await waitFor(() => {
         const widgets = Array.from(
-          container.querySelectorAll('[data-testid^="widget-"]')
+          container.querySelectorAll('article[data-testid^="widget-"]')
         );
         expect(widgets.length).toBe(4);
       });
@@ -359,7 +359,7 @@ describe("WidgetGrid", () => {
 
       await waitFor(() => {
         const widgets = Array.from(
-          container.querySelectorAll('[data-testid^="widget-"]')
+          container.querySelectorAll('article[data-testid^="widget-"]')
         );
         expect(widgets.length).toBe(3);
         expect(widgets[0]).toHaveAttribute("data-testid", "widget-widget2");
@@ -373,7 +373,7 @@ describe("WidgetGrid", () => {
         <WidgetGrid widgetRegistry={mockWidgets} storageKey={customStorageKey} />
       );
 
-      const widgets = container.querySelectorAll('[data-testid^="widget-"]');
+      const widgets = container.querySelectorAll('article[data-testid^="widget-"]');
       widgets.forEach((widget) => {
         expect(widget).toHaveClass("opacity-100");
       });
@@ -395,7 +395,7 @@ describe("WidgetGrid", () => {
       });
 
       const otherWidgets = Array.from(
-        container.querySelectorAll('[data-testid^="widget-"]')
+        container.querySelectorAll('article[data-testid^="widget-"]')
       ).filter((w) => w !== firstWidget);
 
       otherWidgets.forEach((widget) => {
@@ -409,7 +409,7 @@ describe("WidgetGrid", () => {
       );
 
       const firstWidget = container.querySelector(
-        '[data-testid="widget-widget1"]'
+        'article[data-testid="widget-widget1"]'
       );
 
       fireEvent.dragStart(firstWidget!);
@@ -473,7 +473,7 @@ describe("WidgetGrid", () => {
         <WidgetGrid widgetRegistry={mockWidgets} storageKey={customStorageKey} />
       );
 
-      const widgets = container.querySelectorAll('[data-testid^="widget-"]');
+      const widgets = container.querySelectorAll('article[data-testid^="widget-"]');
       widgets.forEach((widget) => {
         expect(widget).toHaveAttribute("aria-grabbed", "false");
       });

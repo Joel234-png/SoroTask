@@ -1,5 +1,7 @@
 import Link from "next/link";
 import { WalletNavSlot } from "@/app/components/WalletNavSlot";
+import { LanguageSelector } from "@/components/LanguageSelector";
+import { ThemeToggle } from "@/components/ThemeToggle";
 import {
   FiActivity,
   FiArrowRight,
@@ -157,6 +159,8 @@ export default function HomePage() {
             </Link>
           </div>
           <div className="flex items-center gap-3">
+            <LanguageSelector />
+            <ThemeToggle />
             <WalletNavSlot />
             <Link
               href="/tasks"

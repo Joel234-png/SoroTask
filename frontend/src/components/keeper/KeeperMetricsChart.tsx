@@ -1,5 +1,6 @@
 "use client";
 
+import { useEffect, useRef, useState } from "react";
 import type { MetricsHistoryPoint } from "@/app/hooks/useKeeperMetrics";
 
 type SeriesKey = "successRate" | "avgFeePaidXlm" | "lastCycleDurationMs";
@@ -45,21 +46,48 @@ export function KeeperMetricsChart({
   formatValue = (v) => v.toFixed(2),
   height = 120,
 }: Props) {
+  const containerRef = useRef<HTMLDivElement>(null);
+  const [width, setWidth] = useState(320);
+
+  useEffect(() => {
+    const el = containerRef.current;
+    if (!el || typeof ResizeObserver === "undefined") return;
+
+    const observer = new ResizeObserver((entries) => {
+      for (const entry of entries) {
+        if (entry.contentRect.width > 0) {
+          setWidth(entry.contentRect.width);
+        }
+      }
+    });
+
+    observer.observe(el);
+
+    return () => {
+      observer.disconnect();
+    };
+  }, []);
+
   const values = samples.map((s) => s[series]);
-  const width = 320;
   const path = buildPath(values, width, height);
   const latest = values[values.length - 1];
 
   if (samples.length === 0) {
     return (
-      <div className="rounded-xl border border-neutral-700 bg-neutral-900/60 p-4">
+      <div
+        ref={containerRef}
+        className="rounded-xl border border-neutral-700 bg-neutral-900/60 p-4"
+      >
         <p className="text-sm text-neutral-400">{label}: waiting for samples…</p>
       </div>
     );
   }
 
   return (
-    <div className="rounded-xl border border-neutral-700 bg-neutral-900/60 p-4">
+    <div
+      ref={containerRef}
+      className="rounded-xl border border-neutral-700 bg-neutral-900/60 p-4"
+    >
       <div className="mb-2 flex items-baseline justify-between gap-2">
         <h3 className="text-sm font-medium text-neutral-200">{label}</h3>
         <span className="text-lg font-semibold text-neutral-100">
@@ -87,3 +115,4 @@ export function KeeperMetricsChart({
     </div>
   );
 }
+

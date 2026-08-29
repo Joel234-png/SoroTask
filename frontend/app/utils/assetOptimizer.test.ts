@@ -1,4 +1,4 @@
-import { SecureAssetOptimizer } from '../assetOptimizer';
+import { SecureAssetOptimizer } from './assetOptimizer';
 
 describe('SecureAssetOptimizer Unit Test Suite', () => {
     let optimizer: SecureAssetOptimizer;

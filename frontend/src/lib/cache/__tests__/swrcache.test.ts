@@ -1,4 +1,4 @@
-import { StaleWhileRevalidateCache } from "./StaleWhileRevalidateCache";
+import { StaleWhileRevalidateCache } from "../StaleWhileRevalidateCache";
 
 // Mock sentry
 jest.mock("../../errors/sentry", () => ({
@@ -9,7 +9,7 @@ describe("StaleWhileRevalidateCache", () => {
   let cache: StaleWhileRevalidateCache;
 
   beforeEach(() => {
-    cache = new StaleWhileRevalidateCache({ enableLogging: false });
+    cache = new StaleWhileRevalidateCache({ enableLogging: false, maxRetries: 0, retryDelayMs: 0 });
   });
 
   it("stores and retrieves data", () => {

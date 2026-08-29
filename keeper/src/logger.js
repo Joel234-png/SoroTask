@@ -1,22 +1,16 @@
 /**
  * Structured Logging Module for SoroTask Keeper
  *
- * Uses pino for high-performance JSON logging with support for:
- * - Multiple log levels: trace, debug, info, warn, error, fatal
- * - Child loggers with module context
- * - Pretty-printing in development mode
- * - NDJSON output in production
- *
- * SECURITY NOTE: Sensitive fields (keypair secrets, private keys, passwords)
- * must NEVER be logged. The logger automatically redacts common sensitive fields.
+ * Uses pino for high-performance JSON logging with ECS & OpenTelemetry compliance:
+ * - ECS & standard fields: service, service_name, environment, trace_id, task_id, ledger_sequence
+ * - W3C TraceContext traceparent support
+ * - Automatic redaction of sensitive fields
+ * - NDJSON output in production conforming 100% to structured JSON schema
  */
 
 const pino = require('pino');
+const { extractOrCreateTraceContext, formatTraceParent } = require('../../scripts/traceContext');
 
-/**
- * List of sensitive fields that should never appear in logs.
- * These are automatically redacted from log output.
- */
 const SENSITIVE_FIELDS = [
   'secret',
   'secretKey',
@@ -40,16 +34,15 @@ function shouldUsePrettyTransport() {
 }
 
 /**
- * Create the base pino logger instance
- *
- * JSON is the default output in every environment so logs remain machine-ingestible.
- * Pretty printing is available only when explicitly requested via LOG_FORMAT=pretty.
+ * Create base pino logger instance formatted for ECS / OpenTelemetry compatibility
  */
 function createBaseLogger(overrides = {}, destination) {
   const loggerOptions = {
     level: normalizeLogLevel(process.env.LOG_LEVEL),
     base: {
       service: 'keeper',
+      service_name: 'keeper',
+      environment: process.env.NODE_ENV || 'production',
       pid: process.pid,
     },
     redact: {
@@ -60,12 +53,27 @@ function createBaseLogger(overrides = {}, destination) {
       bindings(bindings) {
         return {
           service: 'keeper',
+          service_name: 'keeper',
+          environment: process.env.NODE_ENV || 'production',
           pid: bindings.pid,
           module: bindings.module,
         };
       },
       level(label) {
         return { level: label };
+      },
+      log(object) {
+        const formatted = { ...object };
+        if (formatted.traceId && !formatted.trace_id) {
+          formatted.trace_id = formatted.traceId;
+        }
+        if (formatted.taskId && !formatted.task_id) {
+          formatted.task_id = formatted.taskId;
+        }
+        if (formatted.ledgerSequence && !formatted.ledger_sequence) {
+          formatted.ledger_sequence = formatted.ledgerSequence;
+        }
+        return formatted;
       },
     },
     messageKey: 'message',
@@ -94,13 +102,8 @@ function createBaseLogger(overrides = {}, destination) {
   return logger;
 }
 
-// Singleton base logger instance
 let baseLogger = null;
 
-/**
- * Get or create the base logger singleton
- * @returns {Object} Pino logger instance
- */
 function getBaseLogger() {
   if (!baseLogger) {
     baseLogger = createBaseLogger();
@@ -108,24 +111,10 @@ function getBaseLogger() {
   return baseLogger;
 }
 
-/**
- * Create a child logger with module context
- *
- * @param {string} module - Module name (e.g., 'poller', 'executor', 'registry')
- * @returns {Object} Child logger with module context
- *
- * @example
- * const logger = createLogger('poller');
- * logger.info('Polling started', { taskCount: 5 });
- * // Output: {"level":30,"time":"...","module":"poller","msg":"Polling started","taskCount":5}
- */
 function createLogger(module) {
   const parent = getBaseLogger();
-
-  // Create child logger with module context
   const child = parent.child({ module });
 
-  // Wrap the logger to provide a consistent interface
   return {
     trace: (msg, meta = {}) => {
       child.trace(meta, msg);
@@ -145,20 +134,20 @@ function createLogger(module) {
     fatal: (msg, meta = {}) => {
       child.fatal(meta, msg);
     },
-    // Expose the raw pino logger for advanced use cases
     raw: child,
-    // Create a child logger with a correlation ID
-    childWithTrace: (correlationId) => {
-      const traceChild = child.child({ correlationId });
+    childWithTrace: (correlationIdOrContext) => {
+      let traceMeta = {};
+      if (typeof correlationIdOrContext === 'string') {
+        traceMeta = { correlationId: correlationIdOrContext, trace_id: correlationIdOrContext };
+      } else if (correlationIdOrContext && typeof correlationIdOrContext === 'object') {
+        traceMeta = correlationIdOrContext;
+      }
+      const traceChild = child.child(traceMeta);
       return createTracedLogger(traceChild, module);
     },
   };
 }
 
-/**
- * Helper to wrap a pino child logger with the same interface as createLogger
- * @private
- */
 function createTracedLogger(child, module) {
   return {
     trace: (msg, meta = {}) => {
@@ -180,58 +169,43 @@ function createTracedLogger(child, module) {
       child.fatal(meta, msg);
     },
     raw: child,
-    childWithTrace: (correlationId) => {
-      const traceChild = child.child({ correlationId });
+    childWithTrace: (correlationIdOrContext) => {
+      let traceMeta = {};
+      if (typeof correlationIdOrContext === 'string') {
+        traceMeta = { correlationId: correlationIdOrContext, trace_id: correlationIdOrContext };
+      } else if (correlationIdOrContext && typeof correlationIdOrContext === 'object') {
+        traceMeta = correlationIdOrContext;
+      }
+      const traceChild = child.child(traceMeta);
       return createTracedLogger(traceChild, module);
     },
   };
 }
 
-/**
- * Create a logger for a specific module (alias for createLogger)
- * @param {string} module - Module name
- * @returns {Object} Child logger
- */
 function createChildLogger(module) {
   return createLogger(module);
 }
 
-/**
- * Reinitialize the base logger with new options
- * Useful for testing or dynamic configuration changes
- *
- * @param {Object} options - Pino options
- */
 function reinitializeLogger(options = {}) {
   const { destination, ...loggerOptions } = options;
   baseLogger = createBaseLogger(loggerOptions, destination);
 }
 
-/**
- * Get the current log level
- * @returns {string} Current log level
- */
 function getLogLevel() {
   return getBaseLogger().level;
 }
 
-/**
- * Set the log level dynamically
- * @param {string} level - New log level (trace, debug, info, warn, error, fatal)
- */
 function setLogLevel(level) {
   getBaseLogger().level = level;
 }
 
-function injectW3CTraceContext(context, traceId) {
-  // Inject W3C traceparent headers into task execution context.
-  // Export OpenTelemetry traces to Jaeger / Datadog / Grafana Tempo.
-  // Correlate trace IDs with Stellar transaction hashes for full visibility.
-  context.traceparent = `00-${traceId}-0000000000000001-01`;
+function injectW3CTraceContext(context = {}, traceId) {
+  const traceCtx = extractOrCreateTraceContext({ 'traceparent': context.traceparent || traceId });
+  context.traceparent = traceCtx.traceparent;
+  context.trace_id = traceCtx.traceId;
   return context;
 }
 
-// Export the public API
 module.exports = {
   createLogger,
   createChildLogger,

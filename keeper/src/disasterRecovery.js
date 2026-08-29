@@ -48,6 +48,9 @@ function normalizeEndpoint(input, index) {
     latencySamples: [],
     avgLatencyMs: 0,
     errorRate: 0,
+    latestLedger: null,
+    ledgerLag: 0,
+    lastHealthCheckAt: null,
   };
 }
 
@@ -78,6 +81,8 @@ class MultiRegionRPCClient {
     this.cooldownMs = toInt(options.cooldownMs, 30000);
     this.healthCheckIntervalMs = toInt(options.healthCheckIntervalMs, 15000);
     this.healthCheckMethod = options.healthCheckMethod || 'getHealth';
+    this.maxHealthyLedgerLag = toInt(options.maxHealthyLedgerLag, 3);
+    this.latencyPenaltyThresholdMs = toInt(options.latencyPenaltyThresholdMs, 1000);
     this.serverFactory = options.serverFactory || ((url) => new rpc.Server(url));
     this.servers = this.endpoints.map((entry) => this.serverFactory(entry.url));
     this.activeIndex = 0;
@@ -122,9 +127,14 @@ class MultiRegionRPCClient {
         url: endpoint.url,
         score: endpoint.score,
         unavailable: endpoint.unavailable,
+        avgLatencyMs: endpoint.avgLatencyMs,
+        errorRate: endpoint.errorRate,
+        latestLedger: endpoint.latestLedger,
+        ledgerLag: endpoint.ledgerLag,
         consecutiveFailures: endpoint.consecutiveFailures,
         lastFailureAt: endpoint.lastFailureAt,
         lastSuccessAt: endpoint.lastSuccessAt,
+        lastHealthCheckAt: endpoint.lastHealthCheckAt,
       })),
     };
   }
@@ -203,9 +213,88 @@ class MultiRegionRPCClient {
         status,
       };
     });
+    return this.endpoints.map((ep) => ({
+      index: ep.index,
+      region: ep.region,
+      url: ep.url,
+      avgLatencyMs: ep.avgLatencyMs,
+      latestLatencyMs: ep.latencyMs,
+      errorRatePercent: Math.round((ep.errorRate || 0) * 100) / 100,
+      latestLedger: ep.latestLedger,
+      ledgerLag: ep.ledgerLag,
+      consecutiveFailures: ep.consecutiveFailures,
+      score: ep.score,
+      status: ep.unavailable
+        ? 'DEGRADED'
+        : ep.ledgerLag > this.maxHealthyLedgerLag
+          ? 'STALE'
+          : ep.avgLatencyMs > 500
+            ? 'HIGH_LATENCY'
+            : 'HEALTHY',
+    }));
   }
 
-  markSuccess(index, latencyMs = 0) {
+  recalculateLedgerLag() {
+    const latest = Math.max(
+      0,
+      ...this.endpoints
+        .map((endpoint) => endpoint.latestLedger)
+        .filter((value) => Number.isFinite(value)),
+    );
+
+    this.endpoints.forEach((endpoint) => {
+      endpoint.ledgerLag = Number.isFinite(endpoint.latestLedger)
+        ? Math.max(0, latest - endpoint.latestLedger)
+        : 0;
+    });
+  }
+
+  calculateScore(endpoint) {
+    if (endpoint.unavailable) {
+      return 0;
+    }
+
+    const latencyPenalty = endpoint.avgLatencyMs > 0
+      ? Math.min(45, Math.round((endpoint.avgLatencyMs / this.latencyPenaltyThresholdMs) * 45))
+      : 0;
+    const errorPenalty = Math.min(35, Math.round(endpoint.errorRate * 0.35));
+    const lagPenalty = Math.min(30, endpoint.ledgerLag * 10);
+    const failurePenalty = Math.min(20, endpoint.consecutiveFailures * 5);
+
+    return Math.max(0, 100 - latencyPenalty - errorPenalty - lagPenalty - failurePenalty);
+  }
+
+  refreshScores() {
+    this.recalculateLedgerLag();
+    this.endpoints.forEach((endpoint) => {
+      endpoint.score = this.calculateScore(endpoint);
+    });
+  }
+
+  extractLedgerSequence(result) {
+    if (!result || typeof result !== 'object') {
+      return null;
+    }
+
+    const candidates = [
+      result.sequence,
+      result.latestLedger,
+      result.latestLedgerSequence,
+      result.ledger,
+      result.ledgerSeq,
+    ];
+
+    for (const candidate of candidates) {
+      const parsed = Number(candidate);
+      if (Number.isFinite(parsed)) {
+        return parsed;
+      }
+    }
+
+    return null;
+  }
+
+  markSuccess(index, latencyMs = 0, metadata = {}) {
     const endpoint = this.endpoints[index];
     const now = Date.now();
     endpoint.score = Math.min(100, endpoint.score + 5);
@@ -230,15 +319,24 @@ class MultiRegionRPCClient {
         values.reduce((a, b) => a + b, 0) / values.length,
       );
     }
+
+    if (Number.isFinite(metadata.latestLedger)) {
+      endpoint.latestLedger = metadata.latestLedger;
+    }
+
+    if (metadata.healthCheck) {
+      endpoint.lastHealthCheckAt = new Date().toISOString();
+    }
+
     const totalCalls = endpoint.totalSuccesses + endpoint.totalFailures;
     endpoint.errorRate = totalCalls > 0 ? (endpoint.totalFailures / totalCalls) * 100 : 0;
+    this.refreshScores();
   }
 
   markFailure(index, error) {
     const endpoint = this.endpoints[index];
     endpoint.consecutiveFailures += 1;
     endpoint.totalFailures += 1;
-    endpoint.score = Math.max(0, endpoint.score - 30);
     endpoint.lastFailureAt = new Date().toISOString();
 
     const totalCalls = endpoint.totalSuccesses + endpoint.totalFailures;
@@ -254,6 +352,8 @@ class MultiRegionRPCClient {
         error: error && error.message ? error.message : String(error),
       });
     }
+
+    this.refreshScores();
 
     if (this.metrics) {
       this.metrics.increment('failoverEventsTotal', 1);
@@ -289,23 +389,20 @@ class MultiRegionRPCClient {
         if (right.endpoint.score !== left.endpoint.score) {
           return right.endpoint.score - left.endpoint.score;
         }
+        if ((left.endpoint.avgLatencyMs || 0) !== (right.endpoint.avgLatencyMs || 0)) {
+          return (left.endpoint.avgLatencyMs || 0) - (right.endpoint.avgLatencyMs || 0);
+        }
         if (left.endpoint.errorRate !== right.endpoint.errorRate) {
           return left.endpoint.errorRate - right.endpoint.errorRate;
         }
-        return (left.endpoint.avgLatencyMs || 0) - (right.endpoint.avgLatencyMs || 0);
+        return left.index - right.index;
       });
 
     if (scored.length === 0) {
       return this.endpoints.map((_entry, index) => index);
     }
 
-    const indexes = scored.map((entry) => entry.index);
-    const activePos = indexes.indexOf(this.activeIndex);
-    if (activePos > 0) {
-      indexes.splice(activePos, 1);
-      indexes.unshift(this.activeIndex);
-    }
-    return indexes;
+    return scored.map((entry) => entry.index);
   }
 
   async execute(method, ...args) {
@@ -328,8 +425,8 @@ class MultiRegionRPCClient {
         const latencyMs = Date.now() - start;
         this.markSuccess(index, latencyMs);
 
-        if (position > 0) {
-          this.maybeSwitchActiveEndpoint(index, 'failover_success');
+        if (index !== this.activeIndex) {
+          this.maybeSwitchActiveEndpoint(index, position > 0 ? 'failover_success' : 'latency_score_routing');
         }
 
         return result;
@@ -369,15 +466,25 @@ class MultiRegionRPCClient {
       try {
         const start = Date.now();
         await fn.apply(server, []);
+        let latestLedger = null;
+
+        if (typeof server.getLatestLedger === 'function') {
+          const ledger = await server.getLatestLedger();
+          latestLedger = this.extractLedgerSequence(ledger);
+        }
+
         const latencyMs = Date.now() - start;
-        this.markSuccess(index, latencyMs);
+        this.markSuccess(index, latencyMs, {
+          healthCheck: true,
+          latestLedger,
+        });
       } catch (error) {
         this.markFailure(index, error);
       }
 
-      if (!endpoint.unavailable && endpoint.score >= 80 && index !== this.activeIndex) {
+      if (!endpoint.unavailable && index !== this.activeIndex) {
         const active = this.endpoints[this.activeIndex];
-        if (active.unavailable || active.score < endpoint.score) {
+        if (active.unavailable || endpoint.score > active.score) {
           this.maybeSwitchActiveEndpoint(index, 'health_check_rebalance');
         }
       }

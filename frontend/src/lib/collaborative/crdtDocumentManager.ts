@@ -250,7 +250,14 @@ export class CRDTDocumentManager {
     } else {
       // Navigate nested path
       let obj = this.ymap.get(path[0]);
+      if (!obj) {
+        obj = {};
+        this.ymap.set(path[0], obj);
+      }
       for (let i = 1; i < path.length - 1; i++) {
+        if (!obj[path[i]]) {
+          obj[path[i]] = {};
+        }
         obj = obj[path[i]];
       }
       obj[path[path.length - 1]] = value;

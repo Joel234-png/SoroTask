@@ -2,11 +2,14 @@
 
 import React from 'react';
 import { Toaster } from 'sonner';
+import { KeyboardShortcutsProvider } from './KeyboardShortcutsProvider';
 
 export function AppProviders({ children }: { children: React.ReactNode }) {
   return (
     <>
-      {children}
+      {/* Mounted once here so every page inherits the same bindings, rather
+          than each registering its own set and drifting apart (#875). */}
+      <KeyboardShortcutsProvider>{children}</KeyboardShortcutsProvider>
       <Toaster
         position="bottom-right"
         theme="dark"

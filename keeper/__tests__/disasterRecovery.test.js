@@ -1,6 +1,8 @@
 const { MultiRegionRPCClient } = require('../src/disasterRecovery');
 
 describe('MultiRegionRPCClient', () => {
+  const delay = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+
   function createFakeServerFactory(handlersByUrl) {
     return (url) => {
       const handlers = handlersByUrl[url] || {};
@@ -9,6 +11,7 @@ describe('MultiRegionRPCClient', () => {
         getNetwork: handlers.getNetwork || (async () => ({ passphrase: 'test' })),
         getHealth: handlers.getHealth || (async () => ({ status: 'healthy' })),
         getLatestLedger: handlers.getLatestLedger || (async () => ({ sequence: 1 })),
+        sendTransaction: handlers.sendTransaction || (async () => ({ status: 'PENDING', url })),
       };
     };
   }
@@ -142,5 +145,61 @@ describe('MultiRegionRPCClient', () => {
     expect(heatmap[0].rollingOneMinuteLatencyMs).toBe(200);
     expect(heatmap[0].rollingSamplesCount).toBe(2);
     expect(heatmap[0].status).toBe('HEALTHY');
+  test('routes transaction submissions to fastest healthy endpoint after scoring', async () => {
+    const submissions = [];
+    const client = new MultiRegionRPCClient(['https://slow.example', 'https://fast.example'], {
+      serverFactory: createFakeServerFactory({
+        'https://slow.example': {
+          getHealth: async () => {
+            await delay(20);
+            return { status: 'healthy' };
+          },
+          getLatestLedger: async () => ({ sequence: 200 }),
+          sendTransaction: async () => {
+            submissions.push('slow');
+            return { status: 'PENDING', endpoint: 'slow' };
+          },
+        },
+        'https://fast.example': {
+          getHealth: async () => ({ status: 'healthy' }),
+          getLatestLedger: async () => ({ sequence: 200 }),
+          sendTransaction: async () => {
+            submissions.push('fast');
+            return { status: 'PENDING', endpoint: 'fast' };
+          },
+        },
+      }),
+    });
+
+    await client.runHealthCheck();
+    const result = await client.getServerFacade().sendTransaction({ id: 'tx-1' });
+
+    expect(result.endpoint).toBe('fast');
+    expect(submissions).toEqual(['fast']);
+    expect(client.getStateSnapshot().activeRegion).toContain('fast.example');
+  });
+
+  test('penalizes nodes behind the freshest ledger height', async () => {
+    const client = new MultiRegionRPCClient(['https://fresh.example', 'https://stale.example'], {
+      maxHealthyLedgerLag: 3,
+      serverFactory: createFakeServerFactory({
+        'https://fresh.example': {
+          getLatestLedger: async () => ({ sequence: 500 }),
+        },
+        'https://stale.example': {
+          getLatestLedger: async () => ({ sequence: 490 }),
+        },
+      }),
+    });
+
+    await client.runHealthCheck();
+
+    const snapshot = client.getStateSnapshot();
+    const fresh = snapshot.endpoints.find((endpoint) => endpoint.url === 'https://fresh.example');
+    const stale = snapshot.endpoints.find((endpoint) => endpoint.url === 'https://stale.example');
+
+    expect(stale.ledgerLag).toBe(10);
+    expect(stale.score).toBeLessThan(fresh.score);
+    expect(client.getServerFacade().getLatencyHeatmap()[1].status).toBe('STALE');
   });
 });

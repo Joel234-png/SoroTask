@@ -145,9 +145,12 @@ describe('AIChat Component', () => {
       expect(
         screen.getByText(/Configuration Generated/)
       ).toBeInTheDocument();
-      expect(screen.getByText(/harvest/)).toBeInTheDocument();
+      expect(
+        screen.getByText(/Configuration Generated/)
+      ).toBeInTheDocument();
+      expect(screen.getAllByText(/harvest/).length).toBeGreaterThan(0);
       expect(screen.getByText(/3600s/)).toBeInTheDocument();
-      expect(screen.getByText(/50 XLM/)).toBeInTheDocument();
+      expect(screen.getAllByText(/50 XLM/).length).toBeGreaterThan(0);
     });
 
     it('should only display config fields that exist', () => {
@@ -159,9 +162,9 @@ describe('AIChat Component', () => {
 
       render(<AIChat />);
 
-      const configText = screen.getByText(/Configuration Generated/).textContent;
-      expect(configText).toContain('test');
-      expect(configText).toContain('3600');
+      const configCard = screen.getByText(/Configuration Generated/).closest('div');
+      expect(configCard?.textContent).toContain('test');
+      expect(configCard?.textContent).toContain('3600');
       // Address and Gas should not appear
       expect(screen.queryByText(/Address:/)).not.toBeInTheDocument();
       expect(screen.queryByText(/Gas:/)).not.toBeInTheDocument();
@@ -179,7 +182,7 @@ describe('AIChat Component', () => {
       render(<AIChat />);
 
       expect(screen.getByText(/ABI Generated/)).toBeInTheDocument();
-      expect(screen.getByText(/test/)).toBeInTheDocument();
+      expect(screen.getAllByText(/test/).length).toBeGreaterThan(0);
     });
   });
 
@@ -222,8 +225,6 @@ describe('AIChat Component', () => {
 
       render(<AIChat />);
 
-      const dots = screen.getAllByTestId((id) => id === '');
-      // The component shows animated dots - just check that something is rendered
       expect(screen.getByRole('button', { name: /Generating/ })).toBeInTheDocument();
     });
   });

@@ -1,10 +1,17 @@
 const express = require('express');
-const rateLimit = require('express-rate-limit');
 const path = require('path');
-const OpenApiValidator = require('express-openapi-validator');
+const { middleware } = require('express-openapi-validator');
 const { ZKProofService } = require('./index');
+
+const { createMetrics } = require('./lib/metrics');
 const { Halo2ProverAdapter } = require('./lib/halo2-adapter');
 const { selectProverBackend, withProofTiming } = require('./lib/prover-backend');
+const {
+  CircuitRegistry,
+  createCircuitRoutes,
+  sha256Hex,
+} = require('./lib/circuit-registry');
+const { CircuitIntegrityVerifier } = require('./lib/circuit-integrity');
 const {
   hashTaskCondition,
   serializeProof,
@@ -12,67 +19,21 @@ const {
   decryptWitnessECIES,
   zeroizeBuffer,
 } = require('./lib/helpers');
+const {
+  withEphemeralDir,
+  writeFile,
+  startScrubber,
+} = require('./lib/ephemeralDir');
+const { CPU_CONCURRENCY } = require('./lib/prover-job-queue');
 
 const SERVICE_VERSION = '1.0.0';
-
-function sendError(res, status, code, message, details) {
-  const payload = { error: { code, message } };
-  if (details !== undefined) payload.error.details = details;
-  res.status(status).json(payload);
-}
-
-function validateGenerateRequest(body) {
-  const missingFields = [];
-  if (body.taskId == null) missingFields.push('taskId');
-  if (!body.circuitId) missingFields.push('circuitId');
-  if (!body.taskCondition) missingFields.push('taskCondition');
-  if (!body.clientData) missingFields.push('clientData');
-  if (missingFields.length > 0) {
-    return { valid: false, missingFields };
-  }
-  if (!body.taskCondition.type || body.taskCondition.params == null) {
-    return { valid: false, message: 'taskCondition must include type and params' };
-  }
-  if (!body.clientData.witness && !body.clientData.encryptedWitness) {
-    return { valid: false, message: 'clientData.witness or clientData.encryptedWitness is required' };
-  }
-  return { valid: true };
-}
-
-function validateVerifyRequest(body) {
-  const missingFields = [];
-  if (body.taskId == null) missingFields.push('taskId');
-  if (!body.circuitId) missingFields.push('circuitId');
-  if (!body.taskCondition) missingFields.push('taskCondition');
-  if (!body.proof) missingFields.push('proof');
-  if (missingFields.length > 0) {
-    return { valid: false, missingFields };
-  }
-  if (!body.proof.proofId) {
-    return { valid: false, message: 'proof.proofId is required' };
-  }
-  return { valid: true };
-}
-
-/**
- * @param {ZKProofService} zkService
- * @param {{ apiToken?: string, version?: string, startTime?: number, eciesPrivateKey?: string, disableOpenApiValidation?: boolean }} [options]
- */
-/**
- * Creates an express-rate-limit store instance.
- * By default uses the built-in MemoryStore.  In production, replace with a
- * Redis-backed store (e.g. rate-limit-redis) to share state across replicas:
- *
- *   const RedisStore = require('rate-limit-redis');
- *   const store = new RedisStore({ client: redisClient });
- *   createApp(zkService, { rateLimitStore: store });
- *
- * @param {object} [store] - Optional rate-limit store instance.
- * @returns {import('express-rate-limit').Store}
- */
-function createRateLimitStore(store) {
-  return store ?? undefined; // undefined lets express-rate-limit use MemoryStore
-}
+const problem = (res, status, title, detail, errors) => res.status(status).type('application/problem+json').json({
+  type: `https://sorotask.com/problems/${status}`,
+  title,
+  status,
+  detail,
+  ...(errors ? { errors } : {}),
+});
 
 function createApp(zkService, options = {}) {
   const app = express();
@@ -116,132 +77,161 @@ function createApp(zkService, options = {}) {
         'Too many proof requests. Please retry after ' + retryAfter + ' seconds.',
       );
     },
+  app.use(express.json({ limit: '1mb', strict: true }));
+  app.use(middleware({
+    apiSpec: options.apiSpec || path.join(__dirname, 'openapi.yaml'),
+    validateRequests: true,
+    validateResponses: false,
+    unknownFormats: ['int64'],
+  }));
+
+  app.use((req, res, next) => {
+    if (!apiToken || req.path === '/health') return next();
+    const header = req.headers.authorization || '';
+    if (header !== `Bearer ${apiToken}`) return problem(res, 401, 'Unauthorized', 'A valid bearer token is required.');
+    next();
   });
-  // ---------------------------------------------------------------------------
-  // halo2 proof gateway routes (Issue #851).
-  // Registered BEFORE the OpenAPI validator on purpose: these endpoints carry a
-  // `scheme` field (kzg | ipa) that the existing OpenAPI schemas do not model,
-  // and the Halo2ProverAdapter performs its own request validation. The proof
-  // objects are explicitly marked isMock:true — this is a gateway/contract layer,
-  // NOT a real halo2 prover (see lib/halo2-adapter.js).
-  // ---------------------------------------------------------------------------
-  app.post('/generate-proof/halo2', generateProofLimiter, authenticate, (req, res) => {
-    const startedAt = Date.now();
-    const body = req.body || {};
-    const { taskId, circuitId, scheme, taskCondition } = body;
-    const circuitInput = body.clientData?.witness ?? body.circuitInput;
-
-    if (taskId == null || !circuitId || !taskCondition) {
-      return sendError(res, 400, 'INVALID_INPUT', 'taskId, circuitId and taskCondition are required');
-    }
-
-    try {
-      const proof = halo2Adapter.generateProof({ scheme, circuitId, circuitInput });
-      const conditionHash = hashTaskCondition(taskCondition);
-      return res.json({
-        proofId: proof.proofId,
-        status: 'success',
-        taskId,
-        scheme: proof.scheme,
-        conditionHash,
-        proof,
-        backend: halo2Adapter.isMockBackend() ? 'mock-reference' : 'external',
-        isMock: halo2Adapter.isMockBackend(),
-        generatedAt: new Date().toISOString(),
-        processingTimeMs: Date.now() - startedAt,
-      });
-    } catch (error) {
-      if (error.code === 'INVALID_SCHEME' || error.code === 'INVALID_CIRCUIT_INPUT') {
-        return sendError(res, 400, error.code, error.message);
-      }
-      return sendError(res, 500, 'PROOF_GENERATION_FAILED', error.message);
-    }
-  });
-
-  app.post('/verify-proof/halo2', authenticate, (req, res) => {
-    const body = req.body || {};
-    const { taskId, circuitId, scheme, taskCondition, proof } = body;
-
-    if (taskId == null || !circuitId || !taskCondition || !proof) {
-      return sendError(res, 400, 'INVALID_INPUT', 'taskId, circuitId, taskCondition and proof are required');
-    }
-
-    try {
-      const result = halo2Adapter.verifyProof({ scheme, proof });
-      return res.json({
-        valid: result.valid,
-        proofId: proof.proofId,
-        taskId,
-        scheme: scheme.toLowerCase(),
-        conditionHash: hashTaskCondition(taskCondition),
-        isMock: halo2Adapter.isMockBackend(),
-        verifiedAt: new Date().toISOString(),
-        verificationDetails: {
-          circuitId,
-          reason: result.reason,
-          note: 'Structural verification only — mock backend does not verify ZK soundness.',
-        },
-      });
-    } catch (error) {
-      if (error.code === 'INVALID_SCHEME' || error.code === 'INVALID_CIRCUIT_INPUT') {
-        return sendError(res, 400, error.code, error.message);
-      }
-      return sendError(res, 500, 'PROOF_VERIFICATION_FAILED', error.message);
-    }
-  });
-
-  // OpenAPI v3 Schema Validation Middleware
-  if (!options.disableOpenApiValidation) {
-    const apiSpec = path.join(__dirname, 'openapi.yaml');
-    app.use(
-      OpenApiValidator.middleware({
-        apiSpec,
-        validateRequests: true,
-        validateResponses: false,
-        ignorePaths: (pathStr) => pathStr === '/health',
-      }),
-    );
-  }
-
-  function authenticate(req, res, next) {
-    if (!apiToken) return next();
-    const header = req.headers.authorization;
-    if (!header || !header.startsWith('Bearer ') || header.slice(7) !== apiToken) {
-      return sendError(res, 401, 'UNAUTHORIZED', 'Invalid or missing bearer token');
-    }
-    return next();
-  }
 
   app.get('/health', (_req, res) => {
-    const workerPool = zkService.getWorkerPoolStatus();
+    const workerPool = syncPoolGauges();
     let status = 'unavailable';
     if (zkService.isReady && workerPool.totalWorkers > 0) {
       status = workerPool.activeWorkers === workerPool.totalWorkers ? 'degraded' : 'healthy';
     }
-    const httpStatus = status === 'unavailable' ? 503 : 200;
+    // Issue #860: report 503 when queue depth exceeds the safety threshold.
+    const queueOverloaded = inFlight > queueDepthThreshold;
+    if (queueOverloaded && status !== 'unavailable') {
+      status = 'overloaded';
+    }
+    const httpStatus = status === 'unavailable' || status === 'overloaded' ? 503 : 200;
     res.status(httpStatus).json({
       status,
       version,
       workerPool,
+      queueDepth: inFlight,
+      queueDepthThreshold,
+      // Issue #858: WASM sandbox pool status
+      wasmSandboxPool: {
+        poolSize: wasmSandboxPool.poolSize,
+        activeCount: wasmSandboxPool._activeCount,
+        queueDepth: wasmSandboxPool._queue.length,
+        timeoutMs: wasmSandboxPool.timeoutMs,
+        memoryMb: wasmSandboxPool.memoryMb,
+      },
+      proverWorkerLimits: {
+        timeoutMs: zkService.workerTimeoutMs,
+        memoryMb: zkService.workerMemoryMb,
+        isolated: true,
+      },
       uptimeSeconds: Math.floor((Date.now() - startTime) / 1000),
     });
   });
 
-  app.post('/generate-proof', generateProofLimiter, authenticate, async (req, res) => {
-    const startedAt = Date.now();
-    const validation = validateGenerateRequest(req.body || {});
-    if (!validation.valid) {
-      if (validation.missingFields) {
-        return sendError(res, 400, 'INVALID_INPUT', 'taskCondition and clientData are required', {
-          missingFields: validation.missingFields,
-        });
+  // Issue #860: Prometheus scrape endpoint.
+  app.get('/metrics', async (_req, res) => {
+    syncPoolGauges();
+    res.set('Content-Type', metrics.registry.contentType);
+    res.end(await metrics.registry.metrics());
+    const workerPool = zkService.getWorkerPoolStatus();
+    const ready = zkService.isReady && workerPool.totalWorkers > 0;
+    res.status(ready ? 200 : 503).json({ status: ready ? 'healthy' : 'unavailable', version: SERVICE_VERSION, workerPool, uptimeSeconds: 0 });
+  });
+  app.post('/generate-proof', async (req, res, next) => {
+    try {
+      // Use ephemeral directory for WASM execution to isolate artifacts
+      const outputs = await withEphemeralDir(async (ephemeralDir) => {
+        await writeFile(ephemeralDir, 'witness.json', JSON.stringify(inputs || {}));
+        await writeFile(ephemeralDir, 'taskCondition.json', JSON.stringify(taskCondition));
+        return wasmSandboxPool.runInSandbox(wasmBytes, inputs ?? {});
+      });
+      const conditionHash = hashTaskCondition(taskCondition);
+      return res.json({
+        status: 'success',
+        taskId,
+        circuitId,
+        conditionHash,
+        outputs,
+        sandbox: {
+          memoryLimitMb: wasmSandboxPool.memoryMb,
+          timeoutMs: wasmSandboxPool.timeoutMs,
+          isolated: true,
+        },
+        executionTimeMs: Date.now() - startedAt,
+      });
+    } catch (err) {
+      if (err.message && err.message.includes('timeout')) {
+        return sendError(res, 503, 'WASM_SANDBOX_TIMEOUT', err.message);
       }
-      return sendError(res, 400, 'INVALID_INPUT', validation.message);
+      return sendError(res, 500, 'WASM_SANDBOX_ERROR', err.message);
+    }
+  });
+
+  app.get('/proofs/:jobId', async (req, res) => {
+    const { jobId } = req.params;
+    const job = await zkService.getAsyncJob(jobId);
+    if (!job) {
+      return res.status(404).json({ error: 'Job not found' });
+    }
+    return res.json(job);
+  });
+
+  app.get('/proofs/:jobId/stream', async (req, res) => {
+    const { jobId } = req.params;
+    const job = await zkService.getAsyncJob(jobId);
+    res.setHeader('Content-Type', 'text/event-stream');
+    res.setHeader('Cache-Control', 'no-cache');
+    res.setHeader('Connection', 'keep-alive');
+
+    if (!job) {
+      res.write(`event: error\ndata: ${JSON.stringify({ error: 'Job not found', jobId })}\n\n`);
+      return res.end();
+    }
+
+    res.write(`event: status\ndata: ${JSON.stringify(job)}\n\n`);
+    return res.end();
+  });
+
+  app.post('/generate-proof', generateProofLimiter, authenticate, async (req, res) => {
+    const { taskId, circuitId, circuitVersion, taskCondition, clientData, encryptedWitness, privateKeyPem } = req.body || {};
+
+    if (taskId == null || typeof taskId === 'string' && isNaN(Number(taskId)) || !circuitId || !taskCondition) {
+      return res.status(400).json({ error: 'Invalid task parameters' });
     }
 
     if (!zkService.isReady) {
-      return sendError(res, 503, 'SERVICE_NOT_READY', 'ZK proof worker pool is not initialized');
+      return res.status(503).json({ error: 'ZK proof worker pool is not initialized' });
     }
+
+    let witnessData = clientData || { witness: {} };
+    if (encryptedWitness) {
+      const keyPem = privateKeyPem || eciesPrivateKey;
+      if (!keyPem || typeof encryptedWitness.iv === 'string' && encryptedWitness.iv === 'invalid') {
+        return res.status(400).json({ error: 'Invalid ECIES encrypted payload or decryption failure' });
+      }
+      try {
+        const decrypted = decryptWitnessECIES(encryptedWitness, keyPem);
+        witnessData = { ...witnessData, witness: decrypted.witness };
+      } catch (err) {
+        return res.status(400).json({ error: 'Invalid ECIES encrypted payload or decryption failure' });
+      }
+    }
+
+    try {
+      const asyncJob = zkService.enqueueAsyncJob(taskCondition, witnessData, circuitId, getCircuitArtifactHash(circuitId, circuitVersion));
+      return res.status(202).json({
+        jobId: asyncJob.jobId,
+        status: 'queued',
+        taskId: Number(taskId),
+        pollUrl: `/proofs/${asyncJob.jobId}`,
+        createdAt: asyncJob.createdAt,
+      });
+    } catch (error) {
+      return sendError(res, 500, 'PROOF_ENQUEUE_FAILED', error.message);
+    }
+  });
+
+  app.post('/generate-proof/sync', generateProofLimiter, authenticate, async (req, res) => {
+    const startedAt = Date.now();
 
     let { taskId, circuitId, taskCondition, clientData } = req.body;
     let witnessBuffer = null;
@@ -260,7 +250,30 @@ function createApp(zkService, options = {}) {
       }
     }
 
+    // queue-wait proxy: time from request receipt until the worker begins work.
+    metrics.queueWaitMs.observe(Date.now() - startedAt);
+
+    inFlight += 1;
     try {
+      return await withEphemeralDir(async (ephemeralDir) => {
+        // Write witness data to ephemeral directory for isolated prover access
+        await writeFile(ephemeralDir, 'witness.json', JSON.stringify(clientData));
+        await writeFile(ephemeralDir, 'taskCondition.json', JSON.stringify(taskCondition));
+
+        const genStart = Date.now();
+        const rawProof = await zkService.generateProof(taskCondition, clientData);
+        metrics.proofDurationMs.observe(Date.now() - genStart);
+        syncPoolGauges();
+        const constraint = checkConstraint(taskCondition, clientData, circuitId);
+        if (!constraint.ok) {
+          return sendError(
+            res,
+            422,
+            'CONSTRAINT_UNSATISFIED',
+            'Client witness does not satisfy task condition constraints',
+            constraint.details,
+          );
+        }
       const constraint = checkConstraint(taskCondition, clientData, circuitId);
       if (!constraint.ok) {
         return sendError(
@@ -275,10 +288,12 @@ function createApp(zkService, options = {}) {
       // Wrap the real (CPU) proof generation in the timing harness so there is
       // an apples-to-apples wall-clock baseline for a future GPU backend (#850).
       const timed = await withProofTiming(
-        () => zkService.generateProof(taskCondition, clientData),
+        () => zkService.generateProof(taskCondition, clientData, circuitId, getCircuitArtifactHash(circuitId, req.body?.circuitVersion)),
         { backend: proverBackend.backend, label: 'groth16-generate-proof' },
       );
       const rawProof = timed.result;
+      metrics.proofDurationMs.observe(Date.now() - genStart);
+      syncPoolGauges();
       const conditionHash = hashTaskCondition(taskCondition);
       const proof = {
         pi_a: rawProof.pi_a,
@@ -287,20 +302,42 @@ function createApp(zkService, options = {}) {
         publicSignals: rawProof.publicSignals,
       };
 
-      return res.json({
-        proofId: rawProof.proofId,
-        status: 'success',
-        taskId,
-        conditionHash,
-        proof,
-        serializedProof: serializeProof(proof),
-        proverBackend: proverBackend.backend,
-        accelerated: proverBackend.accelerated,
-        generationTimeMs: timed.durationMs,
-        generatedAt: new Date().toISOString(),
-        processingTimeMs: Date.now() - startedAt,
+        // Wrap the real (CPU) proof generation in the timing harness so there is
+        // an apples-to-apples wall-clock baseline for a future GPU backend (#850).
+        const timed = await withProofTiming(
+          () => zkService.generateProof(taskCondition, clientData),
+          { backend: proverBackend.backend, label: 'groth16-generate-proof' },
+        );
+        const proofResult = timed.result;
+        const conditionHash = hashTaskCondition(taskCondition);
+        const proof = {
+          pi_a: proofResult.pi_a,
+          pi_b: proofResult.pi_b,
+          pi_c: proofResult.pi_c,
+          publicSignals: proofResult.publicSignals,
+        };
+
+        return res.json({
+          proofId: proofResult.proofId,
+          status: 'success',
+          taskId,
+          conditionHash,
+          proof,
+          serializedProof: serializeProof(proof),
+          proverBackend: proverBackend.backend,
+          accelerated: proverBackend.accelerated,
+          generationTimeMs: timed.durationMs,
+          generatedAt: new Date().toISOString(),
+          processingTimeMs: Date.now() - startedAt,
+        });
       });
     } catch (error) {
+      if (error.code === 'PROVER_MEMORY_LIMIT') {
+        return sendError(res, 422, 'PROVER_MEMORY_LIMIT', error.message);
+      }
+      if (error.code === 'PROVER_TIMEOUT') {
+        return sendError(res, 504, 'PROVER_TIMEOUT', error.message);
+      }
       if (error.message === 'Worker pool at capacity') {
         return sendError(res, 503, 'SERVICE_NOT_READY', error.message);
       }
@@ -309,6 +346,8 @@ function createApp(zkService, options = {}) {
       }
       return sendError(res, 500, 'PROOF_GENERATION_FAILED', error.message);
     } finally {
+      inFlight -= 1;
+      syncPoolGauges();
       // Zero out decrypted witness buffer immediately after proof generation
       if (witnessBuffer) {
         zeroizeBuffer(witnessBuffer);
@@ -386,7 +425,7 @@ function createApp(zkService, options = {}) {
       return sendError(res, 503, 'SERVICE_NOT_READY', 'ZK proof worker pool is not initialized');
     }
 
-    const { taskId, circuitId, taskCondition, clientData } = req.body;
+    const { taskId, circuitId, circuitVersion, taskCondition, clientData } = req.body;
     const constraint = checkConstraint(taskCondition, clientData, circuitId);
     if (!constraint.ok) {
       return sendError(
@@ -399,7 +438,11 @@ function createApp(zkService, options = {}) {
     }
 
     try {
-      const asyncJob = zkService.enqueueAsyncJob(taskCondition, clientData);
+      // Use ephemeral directory for async proof generation to isolate artifacts
+      const asyncJob = zkService.enqueueAsyncJob(taskCondition, clientData, {
+        ephemeralDir: true,
+      });
+      const asyncJob = zkService.enqueueAsyncJob(taskCondition, clientData, circuitId, getCircuitArtifactHash(circuitId, circuitVersion));
       return res.status(202).json({
         jobId: asyncJob.jobId,
         status: asyncJob.status,
@@ -473,26 +516,193 @@ function createApp(zkService, options = {}) {
     });
   });
 
+  // -------------------------------------------------------------------------
+  // Issue #857 — Circuit Artifact Registry routes
+  //
+  // Mounts GET /circuits, /circuits/:id, /circuits/:id/:version, and
+  // /circuits/:id/:version/artifact?type=wasm|zkey|verifier endpoints.
+  // The registry instance is injectable for testing (options.circuitRegistry).
+  // -------------------------------------------------------------------------
+  const circuitRegistry = options.circuitRegistry ?? new CircuitRegistry();
+  function getCircuitArtifactHash(circuitId, circuitVersion) {
+    if (!circuitVersion) return '';
+    const manifest = circuitRegistry.getManifest(circuitId, circuitVersion);
+    return manifest ? sha256Hex(Buffer.from(JSON.stringify(manifest))) : '';
+  }
+  app.use(createCircuitRoutes(circuitRegistry));
+
+  // -------------------------------------------------------------------------
+  // Issue #853 — ZK Identity Attestation Gate (Sybil-Resistant Task Invocation)
+  //
+  // Integrates Semaphore-style Merkle membership proofs for anonymous,
+  // authorized task execution. Task creators can restrict execution to verified
+  // community members (identified by membership in a Merkle group) without
+  // revealing the member's public key or real-world identity.
+  //
+  // This implements the on-chain verifiable membership check off-chain, using a
+  // Sparse Merkle Tree (SMT) constructed from a trusted set of member identity
+  // commitments (hashed public keys). The member proves inclusion by submitting:
+  //   - identityCommitment  : SHA-256(publicKey) — acts as the anonymous leaf
+  //   - merkleProof         : Array of sibling hashes from leaf → root
+  //   - merkleRoot          : The group root stored at registration time
+  //
+  // The gate verifies inclusion WITHOUT seeing the actual public key, maintaining
+  // 100% anonymity. The gate also enforces a per-nullifier spend limit (default
+  // 1 use) to prevent Sybil replay attacks: each (circuitId, nullifier) pair may
+  // only invoke a task once per epoch.
+  //
+  // Endpoints:
+  //   POST /identity/group         — Register a new member group with a Merkle root
+  //   POST /identity/verify-member — Verify membership proof for task access
+  //   GET  /identity/groups        — List registered group roots
+  // -------------------------------------------------------------------------
+
+  /**
+   * In-memory group store: groupId → { merkleRoot, createdAt, memberCount? }
+   * In production this would be persisted to a DB and the merkle root written
+   * to the on-chain verifier contract.
+   * @type {Map<string, object>}
+   */
+  const identityGroups = options.identityGroups ?? new Map();
+
+  /**
+   * Nullifier set to prevent Sybil replay: tracks used (groupId, nullifier)
+   * pairs so each anonymous member can only execute a given circuit once per
+   * epoch. The nullifier is nullifier = SHA-256(identitySecret || circuitId).
+   * @type {Set<string>}
+   */
+  const usedNullifiers = options.usedNullifiers ?? new Set();
+
+  /**
+   * Verify a Merkle inclusion proof.
+   * Uses a binary hash tree: parent = SHA-256(min(left, right) || max(left, right))
+   * (order-independent, matching most Semaphore/Poseidon-style implementations).
+   *
+   * @param {string}   leafHash    - SHA-256 hex of the identity commitment
+   * @param {string[]} siblings    - Sibling hashes from leaf to root
+   * @param {number[]} pathIndices - 0 = left, 1 = right for each level
+   * @param {string}   expectedRoot
+   * @returns {boolean}
+   */
+  function verifyMerkleProof(leafHash, siblings, pathIndices, expectedRoot) {
+    if (siblings.length !== pathIndices.length) return false;
+    let current = leafHash;
+    for (let i = 0; i < siblings.length; i++) {
+      const sibling = siblings[i];
+      // Order-independent hash: always hash (smaller, larger) to match client
+      const left = current <= sibling ? current : sibling;
+      const right = current <= sibling ? sibling : current;
+      current = sha256Hex(Buffer.from(left + right, 'hex'));
+    }
+    return current === expectedRoot;
+  }
+
+  /**
+   * POST /identity/group
+   *
+   * Register a new membership group identified by a Merkle root.
+   * The group creator supplies the root computed over their member set
+   * (e.g. SHA-256 of each member's public key, arranged in a balanced binary
+   * hash tree). The root acts as the on-chain commitment to the member set.
+   *
+   * Body: { groupId: string, merkleRoot: string, memberCount?: number }
+   * Response 201: { groupId, merkleRoot, createdAt }
+   */
+  app.post('/identity/group', authenticate, (req, res) => {
+    const { groupId, merkleRoot, memberCount } = req.body || {};
+
+    if (!groupId || typeof groupId !== 'string') {
+      return sendError(res, 400, 'INVALID_INPUT', 'groupId must be a non-empty string');
+    }
+    if (!merkleRoot || typeof merkleRoot !== 'string' || !/^[0-9a-fA-F]{64}$/.test(merkleRoot)) {
+      return sendError(res, 400, 'INVALID_INPUT', 'merkleRoot must be a 64-character hex string (SHA-256)');
+    }
+    if (identityGroups.has(groupId)) {
+      return sendError(res, 409, 'GROUP_ALREADY_EXISTS', `Group already registered: ${groupId}`);
+    }
+
+    const record = {
+      groupId,
+      merkleRoot: merkleRoot.toLowerCase(),
+      memberCount: typeof memberCount === 'number' ? memberCount : null,
+      createdAt: new Date().toISOString(),
+    };
+    identityGroups.set(groupId, record);
+
+    return res.status(201).json(record);
+  });
+
+  /**
+   * GET /identity/groups
+   *
+   * List all registered identity group IDs and their Merkle roots.
+   * Response 200: { groups: [{ groupId, merkleRoot, memberCount, createdAt }] }
+   */
+  app.get('/identity/groups', authenticate, (_req, res) => {
+    res.json({ groups: Array.from(identityGroups.values()) });
+      const proof = await zkService.generateProof(req.body.taskCondition, req.body.clientData);
+      res.json({ proofId: proof.proofId, status: 'success', taskId: req.body.taskId, conditionHash: JSON.stringify(req.body.taskCondition), proof, serializedProof: JSON.stringify(proof), generatedAt: new Date().toISOString(), processingTimeMs: 0 });
+    } catch (error) { next(error); }
+  });
+  app.post('/verify-proof', async (req, res, next) => {
+    try {
+      const result = await zkService.verifyProof(req.body);
+      res.json({ ...result, taskId: req.body.taskId, verifiedAt: new Date().toISOString() });
+    } catch (error) { next(error); }
+  });
+
+  app.use((error, _req, res, _next) => {
+    if (res.headersSent) return;
+    const status = error.status || (error.message === 'Worker pool at capacity' ? 503 : 500);
+    problem(res, status, status === 503 ? 'Service Unavailable' : 'Request Failed', error.message || 'Unexpected service error', error.errors);
+  });
   return app;
 }
 
-function createServer(options = {}) {
+async function createServer(options = {}) {
   const workerCount = options.workerCount ?? (Number(process.env.ZK_PROOF_WORKERS) || 4);
+function createServer(options = {}) {
+  const workerCount = options.workerCount ?? (Number(process.env.ZK_PROOF_WORKERS) || CPU_CONCURRENCY);
   const zkService = options.zkService ?? new ZKProofService(workerCount);
   if (!options.skipInitialize) {
     zkService.initialize();
   }
+
+  // Issue #1077: Boot-time circuit integrity attestation
+  // Verify all circuit artifact checksums before accepting any proof requests.
+  if (!options.skipAttestation) {
+    const integrityVerifier = options.integrityVerifier ?? new CircuitIntegrityVerifier({
+      circuitsDir: options.circuitsDir || path.join(__dirname, 'circuits'),
+      signingSecret: options.signingSecret || process.env.CIRCUIT_MANIFEST_SECRET || '',
+    });
+    const attestation = await integrityVerifier.attestOnBoot();
+    if (!attestation.ok) {
+      throw new Error('Circuit integrity attestation failed. Service cannot start.');
+    }
+  }
+
   const app = createApp(zkService, options);
   return { app, zkService };
+  const zkService = options.zkService || new ZKProofService(options.workerCount || 4);
+  if (!options.skipInitialize) zkService.initialize();
+  return { app: createApp(zkService, options), zkService };
 }
 
-const PORT = Number(process.env.PORT) || 3100;
-
 if (require.main === module) {
+  createServer().then(({ app }) => {
+    app.listen(PORT, () => {
+      console.log(`ZK Proof Service listening on port ${PORT}`);
+    });
+  }).catch((err) => {
+    console.error(`[FATAL] Server startup failed: ${err.message}`);
+    process.exit(1);
   const { app } = createServer();
   app.listen(PORT, () => {
     console.log(`ZK Proof Service listening on port ${PORT}`);
+    // Issue #1076: Start background scrubber to remove orphaned ephemeral dirs
+    startScrubber();
   });
+  app.listen(Number(process.env.PORT) || 3100, () => console.log('ZK Proof Service listening'));
 }
 
-module.exports = { createApp, createServer, createRateLimitStore };
+module.exports = { createApp, createServer };
