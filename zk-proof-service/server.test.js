@@ -104,4 +104,95 @@ describe('strict OpenAPI request validation', () => {
     expect(verifyRes.body.valid).toBe(true);
     expect(verifyRes.body.provingScheme).toBe('plonk');
   });
+
+  test('POST /proofs/async returns 202 with an immediate job_id and queued status', async () => {
+    const { EventEmitter } = require('events');
+    const zkService = new EventEmitter();
+    zkService.isReady = true;
+    zkService.initialize = () => {};
+    zkService.getWorkerPoolStatus = () => ({ totalWorkers: 4, activeWorkers: 0, idleWorkers: 4 });
+    zkService.enqueueAsyncJob = () => ({ jobId: 'job-abc', status: 'queued', createdAt: new Date().toISOString() });
+    zkService.getAsyncJob = async () => null;
+    zkService.proofCache = { get: async () => null, set: async () => {}, close: async () => {} };
+    zkService.proverQueue = { close: async () => {} };
+
+    const { app } = await createServer({ zkService, skipAttestation: true, skipInitialize: true });
+    const res = await request(app).post('/proofs/async').send({
+      taskId: 1,
+      circuitId: 'liquidity-threshold-v1',
+      taskCondition: { type: 'liquidity-threshold', params: { minLiquidity: 100 } },
+      clientData: { witness: { actualLiquidity: 500 } },
+    });
+
+    expect(res.status).toBe(202);
+    expect(res.body.jobId).toBe('job-abc');
+    expect(res.body.status).toBe('queued');
+  });
+
+  test('GET /proofs/:job_id/stream pushes progress then the final proof payload over SSE', async () => {
+    const { EventEmitter } = require('events');
+    const zkService = new EventEmitter();
+    zkService.isReady = true;
+    zkService.initialize = () => {};
+    zkService.getWorkerPoolStatus = () => ({ totalWorkers: 4, activeWorkers: 0, idleWorkers: 4 });
+
+    const job = {
+      jobId: 'job-sse',
+      status: 'queued',
+      progress: 0,
+      result: null,
+      error: null,
+      createdAt: new Date().toISOString(),
+    };
+    zkService.getAsyncJob = async () => job;
+    zkService.enqueueAsyncJob = () => ({ jobId: 'job-sse', status: 'queued', createdAt: job.createdAt });
+    zkService.proofCache = { get: async () => null, set: async () => {}, close: async () => {} };
+    zkService.proverQueue = { close: async () => {} };
+
+    const { app } = await createServer({ zkService, skipAttestation: true, skipInitialize: true });
+
+    setTimeout(() => {
+      job.status = 'processing';
+      job.progress = 55;
+      zkService.emit('jobProgress', { jobId: 'job-sse', status: 'processing', progress: 55 });
+    }, 20);
+    setTimeout(() => {
+      job.status = 'completed';
+      job.progress = 100;
+      job.result = {
+        proofId: 'proof-sse',
+        status: 'success',
+        conditionHash: '0xabc123',
+        proof: { pi_a: [], pi_b: [], pi_c: [], publicSignals: [] },
+      };
+      zkService.emit('jobComplete', job);
+    }, 70);
+
+    const res = await request(app).get('/proofs/job-sse/stream');
+    expect(res.status).toBe(200);
+    expect(res.headers['content-type']).toMatch(/text\/event-stream/);
+    expect(res.text).toContain('event: status');
+    expect(res.text).toContain('"status":"queued"');
+    expect(res.text).toContain('event: progress');
+    expect(res.text).toContain('"progress":55');
+    expect(res.text).toContain('event: complete');
+    expect(res.text).toContain('"proofId":"proof-sse"');
+  });
+
+  test('rejects malformed POST /proofs/async body with RFC 7807 before reaching the handler', async () => {
+    const mockZkService = {
+      isReady: true,
+      getWorkerPoolStatus: () => ({ totalWorkers: 4, activeWorkers: 0, idleWorkers: 4 }),
+    };
+    const { app } = await createServer({ zkService: mockZkService, skipAttestation: true });
+    const res = await request(app).post('/proofs/async').send({
+      taskId: 'not-an-integer',
+      hello: 'world',
+    });
+
+    expect(res.status).toBe(400);
+    expect(res.headers['content-type']).toMatch(/application\/problem\+json/);
+    expect(res.body.status).toBe(400);
+    expect(res.body.errors).toBeDefined();
+  });
 });
