@@ -9,6 +9,7 @@ const { runStaleTaskCleanup } = require("./staleTasks");
 const { startApiServer } = require("./api");
 const { broadcastEvent } = require("./wsServer");
 const { computeAndStoreLedgerMerkle } = require("./merkleStore");
+const { LedgerAuditor, ensureAuditSchema } = require("./ledgerAuditor");
 const { scheduleArchival } = require("./archival");
 const { pubsub, EVENT_ADDED } = require("./graphql/pubsub");
 const { LedgerHashValidator } = require("./ledgerHashValidator");
@@ -682,6 +683,20 @@ if (!handleCLI()) {
   // Start periodic reconciliation
   console.log("Starting periodic reconciliation (every 5 minutes)...");
   setInterval(reconcileAll, RECONCILE_INTERVAL_MS);
+
+  // Issue #800: background ledger integrity audit — recompute per-ledger Merkle
+  // roots and alert operators the moment the store diverges from what was
+  // anchored at ingest time (catches silent corruption / parser bugs).
+  ensureAuditSchema(dbDeps).catch((err) => {
+    console.error("[LedgerAuditor] Schema init error:", err.message);
+  });
+  const ledgerAuditor = new LedgerAuditor({
+    deps: dbDeps,
+    rpc,
+    intervalMs: Number(process.env.AUDIT_INTERVAL_MS || 15 * 60 * 1000),
+    maxLedgers: Number(process.env.AUDIT_MAX_LEDGERS || 64),
+  });
+  ledgerAuditor.start();
 
   // Start synthetic transaction monitoring for end-to-end ingestion health
   const syntheticMonitor = new SyntheticMonitor({
