@@ -198,6 +198,32 @@ function loadConfig() {
       sweepEnabled: parseBoolean(process.env.WALLET_SWEEP_ENABLED, false),
       sweepTargetAmount: parseFloat(process.env.WALLET_SWEEP_TARGET_AMOUNT_XLM) || 100,
     },
+    // Issue #787 — auto-swap earned stablecoin bounties to XLM when the
+    // keeper's native balance runs low. Defaults disabled: this submits
+    // real swap transactions on the keeper's own signing account, so it
+    // must be an explicit opt-in, not silently active for every deployment.
+    gasVaultRefill: {
+      enabled: parseBoolean(process.env.GAS_VAULT_REFILL_ENABLED, false),
+      // Trigger a swap when the keeper's XLM balance falls below this.
+      triggerThresholdXlm: parseFloat(process.env.GAS_VAULT_REFILL_TRIGGER_XLM) || 30,
+      // Swap enough to bring the XLM balance up to roughly this amount.
+      targetBalanceXlm: parseFloat(process.env.GAS_VAULT_REFILL_TARGET_XLM) || 100,
+      // Soroswap-compatible router contract ID.
+      routerContractId: process.env.GAS_VAULT_REFILL_ROUTER_CONTRACT_ID || null,
+      // Comma-separated stablecoin contract IDs to draw from, in priority order.
+      sourceAssetContractIds: (process.env.GAS_VAULT_REFILL_SOURCE_ASSETS || '')
+        .split(',')
+        .map((s) => s.trim())
+        .filter(Boolean),
+      // Native XLM (SAC) contract ID for the target side of the swap.
+      xlmContractId: process.env.GAS_VAULT_REFILL_XLM_CONTRACT_ID || null,
+      // Max acceptable slippage, as a fraction (0.01 = 1%).
+      maxSlippage: parseFloat(process.env.GAS_VAULT_REFILL_MAX_SLIPPAGE) || 0.01,
+      // Minimum time between swap attempts, to avoid repeated swaps from
+      // one still-settling transaction.
+      cooldownMs: parseInteger(process.env.GAS_VAULT_REFILL_COOLDOWN_MS, 600000),
+      checkIntervalMs: parseInteger(process.env.GAS_VAULT_REFILL_CHECK_INTERVAL_MS, 60000),
+    },
   };
 
   logger.info('SLO thresholds active', {

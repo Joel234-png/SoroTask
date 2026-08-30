@@ -363,6 +363,24 @@ class ZKProofService extends EventEmitter {
   }
 
   /**
+   * Load-balance across the worker pool: picks the first idle worker entry
+   * and marks it active before dispatching a job to it.
+   *
+   * This method was called from `generateProof()` but was never defined —
+   * every `/generate-proof` request threw `this._acquireWorker is not a
+   * function` at runtime, meaning the worker pool below (spawn,
+   * crash-replace, timeout, memory limits) could never actually be reached.
+   *
+   * @returns {{id: number, status: string, worker: import('worker_threads').Worker, job: object|null}|null}
+   */
+  _acquireWorker() {
+    const entry = this.workers.find((candidate) => candidate.status === 'idle');
+    if (!entry) return null;
+    entry.status = 'active';
+    return entry;
+  }
+
+  /**
    * @param {{ id: number }} worker
    */
   _releaseWorker(worker) {
@@ -416,12 +434,6 @@ class ZKProofService extends EventEmitter {
       })
       .catch(() => {});
     return proofPromise;
-    try {
-      await new Promise((resolve) => setTimeout(resolve, 0));
-      return { proofId: crypto.randomUUID(), pi_a: ['0x1', '0x2'], pi_b: [['0x3', '0x4'], ['0x5', '0x6']], pi_c: ['0x7', '0x8'], publicSignals: ['0x9'] };
-    } finally {
-      worker.status = 'idle';
-    }
   }
 
   async verifyProof({ taskCondition, proof, conditionHash, circuitId }) {
