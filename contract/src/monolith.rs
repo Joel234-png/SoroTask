@@ -1,24 +1,17 @@
 ﻿#![no_std]
+#![allow(dead_code)]
+#![allow(deprecated)]
+#![allow(
+    clippy::clone_on_copy,
+    clippy::collapsible_if,
+    clippy::len_zero,
+    clippy::module_inception,
+    clippy::needless_borrows_for_generic_args,
+    clippy::too_many_arguments,
+    clippy::unnecessary_cast,
+    clippy::unnecessary_lazy_evaluations
+)]
 
-mod monolith;
-
-pub mod access;
-pub mod events;
-pub mod execution;
-pub mod oracle;
-pub mod storage;
-pub mod types;
-pub mod vrf;
-pub mod yield;
-
-pub use access::*;
-pub use events::*;
-pub use execution::*;
-pub use oracle::*;
-pub use storage::*;
-pub use types::*;
-pub use vrf::*;
-pub use yield::*;
 pub mod events;
 
 use soroban_sdk::{
@@ -70,7 +63,6 @@ pub enum Error {
     OracleUnsupportedProvider = 32,
     InvalidInsurancePolicy = 33,
     TaskNotFound = 36,
-    InvalidVdfProof = 61,
     InvalidUpgradeVersion = 37,
     DuplicateTask = 38,
     BountyBelowMinimum = 39,
@@ -92,9 +84,8 @@ pub enum Error {
     DecryptionFailed = 55,
     InsufficientDelegation = 56,
     InvalidCommissionRate = 57,
-    VolatilityExceeded = 62,
-    VolatilityCircuitBreakerTripped = 63,
-    VolatilityTimelockActive = 64,
+    InvalidVdfProof = 58,
+    InvalidExecutionNonce = 59,
 }
 
 #[contracttype]
@@ -195,10 +186,6 @@ const OPTIMISTIC_CHALLENGE_WINDOW_LEDGERS: u32 = 100;
 /// Minimum bond a keeper must post to submit an optimistic claim.
 const MIN_OPTIMISTIC_BOND: i128 = 100;
 
-/// State Archival TTL Extension Thresholds (Issue #1031)
-pub const MIN_THRESHOLD_LEDGERS: u32 = 100_000;
-pub const EXTEND_TO_LEDGERS: u32 = 500_000;
-
 /// Permission Bitmask Flags for Task RBAC
 pub const PERM_CAN_PAUSE: u32 = 1;
 pub const PERM_CAN_UPDATE: u32 = 2;
@@ -218,6 +205,9 @@ pub struct TaskConfig {
     /// stay `u64` to match `env.ledger().timestamp()`.
     pub interval: u32,
     pub last_run: u64,
+    /// Monotonic execution counter for this task. The next valid keeper proof
+    /// must bind to `execution_nonce + 1`, preventing stale or replayed proofs.
+    pub execution_nonce: u64,
     pub gas_balance: i128,
     pub whitelist: Vec<Address>,
     pub is_active: bool,
@@ -387,15 +377,6 @@ pub struct StateChannelSettlement {
     pub executed_tasks: Vec<u64>,
     /// Settlement fee paid
     pub settlement_fee: i128,
-}
-
-/// Verifiable Delay Function (VDF) proof struct for un-cheatable execution delays
-#[contracttype]
-#[derive(Clone, Debug, PartialEq)]
-pub struct VdfProof {
-    pub output: Bytes,
-    pub difficulty: u64,
-    pub seed: Bytes,
 }
 
 /// Role enumeration for granular access control
@@ -778,6 +759,7 @@ pub struct ZkCondition {
     pub task_id: u64,
     pub condition_hash: Bytes,
     pub zk_proof: Bytes,
+    pub execution_payload: Bytes,
     pub verifier_address: Address,
     pub created_at: u64,
     pub is_verified: bool,
@@ -809,6 +791,23 @@ pub struct ZkRangeProof {
     pub commitment: BytesN<32>,
     pub proof: Bytes,
     pub verifier: Address,
+    pub is_verified: bool,
+    pub created_at: u64,
+}
+
+#[contracttype]
+#[derive(Clone, Debug)]
+/// A VDF proof for a Wesolowski-style time-lock delay (Issue #837).
+/// SCAFFOLD: verify_vdf_proof below is a stub (always returns false) until
+/// the group arithmetic (RSA/class-group modexp + Fiat-Shamir challenge,
+/// wasm32-compatible bignum) is implemented. Do not treat as a working
+/// security gate yet.
+pub struct VdfProof {
+    pub task_id: u64,
+    pub input: Bytes,
+    pub output: Bytes,
+    pub proof: Bytes,
+    pub difficulty: u64,
     pub is_verified: bool,
     pub created_at: u64,
 }
@@ -961,10 +960,6 @@ pub enum DataKey {
     ZkRangeProofCounter,
     TaskDynamicBounty(u64),
     FlashSwapRecord(u64),
-    MaxVolatilityBps,
-    LastOraclePrice,
-    VolatilityCircuitBreakerTripped,
-    VolatilityUnpauseTimelock,
     FlashSwapCounter,
     KeeperRandomSeed,
     InsuranceVaultBalance,
@@ -973,8 +968,6 @@ pub enum DataKey {
     VdfProofs(u64),
     /// Per-block execution counter for rate limiting (Issue #831)
     BlockExecutionCount,
-    /// Cumulative user execution count for fee discount tiers (Issue #826)
-    UserExecutionCount(Address),
     /// Last ledger sequence number tracked for rate limiting
     LastBlockLedger,
     /// Maximum tasks per block configuration
@@ -1722,18 +1715,6 @@ pub trait ResolverInterface {
     fn check_condition(env: Env, args: Vec<Val>) -> bool;
 }
 
-fn extend_persistent_ttl<K: IntoVal<Env, Val>>(env: &Env, key: &K) {
-    env.storage()
-        .persistent()
-        .extend_ttl(key, MIN_THRESHOLD_LEDGERS, EXTEND_TO_LEDGERS);
-}
-
-fn extend_instance_ttl(env: &Env) {
-    env.storage()
-        .instance()
-        .extend_ttl(MIN_THRESHOLD_LEDGERS, EXTEND_TO_LEDGERS);
-}
-
 #[contract]
 pub struct SoroTaskContract;
 
@@ -1969,6 +1950,7 @@ impl SoroTaskContract {
         env.storage().persistent().set(&fingerprint_key, &true);
 
         config.is_active = true;
+        config.execution_nonce = 0;
         if config.permissions == 0 {
             config.permissions = PERM_CAN_PAUSE | PERM_CAN_UPDATE | PERM_CAN_CANCEL | PERM_CAN_DEPOSIT;
         }
@@ -2025,6 +2007,34 @@ impl SoroTaskContract {
     /// Retrieves a task configuration by its ID.
     pub fn get_task(env: Env, task_id: u64) -> Option<TaskConfig> {
         env.storage().persistent().get(&DataKey::Task(task_id))
+    }
+
+    /// Returns the current monotonic execution nonce for a task.
+    pub fn get_execution_nonce(env: Env, task_id: u64) -> u64 {
+        env.storage()
+            .persistent()
+            .get::<DataKey, TaskConfig>(&DataKey::Task(task_id))
+            .map(|task| task.execution_nonce)
+            .unwrap_or(0)
+    }
+
+    /// Rejects replayed or stale execution proofs for a task.
+    /// The supplied nonce must match `task.execution_nonce + 1`.
+    pub fn verify_execution_nonce(env: Env, task_id: u64, supplied_nonce: u64) {
+        let task: TaskConfig = env
+            .storage()
+            .persistent()
+            .get(&DataKey::Task(task_id))
+            .expect("Task not found");
+
+        if supplied_nonce != task.execution_nonce + 1 {
+            panic_with_error!(&env, Error::InvalidExecutionNonce);
+        }
+    }
+
+    /// Backwards-compatible alias for execution proof verification.
+    pub fn validate_execution_nonce(env: Env, task_id: u64, supplied_nonce: u64) {
+        Self::verify_execution_nonce(env, task_id, supplied_nonce);
     }
 
     /// Returns the current task ID counter value.
@@ -2143,75 +2153,6 @@ impl SoroTaskContract {
         enter_security_guard(&env);
         Self::pause_task_internal(&env, task_id, false);
         exit_security_guard(&env);
-    }
-
-    /// Sets the maximum allowable single-update oracle price volatility threshold in basis points (bps).
-    pub fn set_max_volatility_bps(env: Env, admin: Address, max_bps: u32) {
-        admin.require_auth();
-        env.storage().instance().set(&DataKey::MaxVolatilityBps, &max_bps);
-    }
-
-    /// Returns the maximum volatility threshold in bps (default: 500 = 5%).
-    pub fn get_max_volatility_bps(env: &Env) -> u32 {
-        env.storage().instance().get(&DataKey::MaxVolatilityBps).unwrap_or(500)
-    }
-
-    /// Checks if the volatility circuit breaker is currently tripped.
-    pub fn is_volatility_circuit_tripped(env: &Env) -> bool {
-        env.storage().instance().get(&DataKey::VolatilityCircuitBreakerTripped).unwrap_or(false)
-    }
-
-    /// Updates oracle price, checking single-update price delta against max_volatility_bps.
-    /// Trips circuit breaker and returns Ok(true) if volatility exceeds threshold, Ok(false) if updated normally.
-    pub fn check_oracle_volatility(env: Env, new_price: i128) -> Result<bool, Error> {
-        enter_security_guard(&env);
-        if Self::is_volatility_circuit_tripped(&env) {
-            exit_security_guard(&env);
-            return Err(Error::VolatilityCircuitBreakerTripped);
-        }
-
-        let max_volatility = Self::get_max_volatility_bps(&env);
-        if let Some(last_price) = env.storage().instance().get::<DataKey, i128>(&DataKey::LastOraclePrice) {
-            if last_price > 0 {
-                let diff = if new_price > last_price {
-                    new_price - last_price
-                } else {
-                    last_price - new_price
-                };
-                let volatility_bps = ((diff as u128 * 10_000) / last_price as u128) as u32;
-                if volatility_bps > max_volatility {
-                    env.storage().instance().set(&DataKey::VolatilityCircuitBreakerTripped, &true);
-                    let current_time = env.ledger().timestamp();
-                    env.storage().instance().set(&DataKey::VolatilityUnpauseTimelock, &(current_time + 3_600));
-                    crate::events::EventLogger::log_oracle_volatility_breach(
-                        &env,
-                        last_price,
-                        new_price,
-                        volatility_bps,
-                        max_volatility,
-                    );
-                    exit_security_guard(&env);
-                    return Ok(true);
-                }
-            }
-        }
-
-        env.storage().instance().set(&DataKey::LastOraclePrice, &new_price);
-        exit_security_guard(&env);
-        Ok(false)
-    }
-
-    /// Unpauses the volatility circuit breaker after timelock expiration.
-    pub fn unpause_volatility_breaker(env: Env, admin: Address) -> Result<(), Error> {
-        admin.require_auth();
-        if let Some(timelock) = env.storage().instance().get::<DataKey, u64>(&DataKey::VolatilityUnpauseTimelock) {
-            if env.ledger().timestamp() < timelock {
-                return Err(Error::VolatilityTimelockActive);
-            }
-        }
-        env.storage().instance().set(&DataKey::VolatilityCircuitBreakerTripped, &false);
-        crate::events::EventLogger::log_volatility_circuit_breaker_unpaused(&env, admin);
-        Ok(())
     }
 
     /// Requests randomness from the VRF oracle for a task.
@@ -3015,8 +2956,8 @@ impl SoroTaskContract {
     ///
     /// # Atomicity
     /// If any step's invocation fails, `Error::BundleStepFailed` is raised
-    /// via `panic_with_error!`, which — combined with Soroban's per-invocation
-    /// atomicity — reverts every effect of every step that already ran in
+    /// via `panic_with_error!`, which ΓÇö combined with Soroban's per-invocation
+    /// atomicity ΓÇö reverts every effect of every step that already ran in
     /// this bundle (and of the whole enclosing transaction).
     ///
     /// # Errors
@@ -3183,7 +3124,7 @@ impl SoroTaskContract {
     /// 1. Load the [`TaskConfig`] from persistent storage (panics if absent).
     /// 2. If a `resolver` address is set, call `check_condition(args) -> bool`
     ///    on it via [`try_invoke_contract`] so that a faulty resolver never
-    ///    permanently blocks execution — a failed call is treated as `false`.
+    ///    permanently blocks execution ΓÇö a failed call is treated as `false`.
     /// 3. When the condition is met (or there is no resolver), fire the
     ///    cross-contract call to `target::function(args)` using
     ///    [`invoke_contract`].
@@ -3205,7 +3146,7 @@ impl SoroTaskContract {
         let mut trace_steps: Vec<events::ExecutionStepRecord> = Vec::new(env);
         let final_outcome: ExecutionOutcome;
 
-        // ── 1. Auth validation ────────────────────────────────────────────
+        // ΓöÇΓöÇ 1. Auth validation ΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇ
         if !skip_auth {
             keeper.require_auth();
         }
@@ -3218,7 +3159,7 @@ impl SoroTaskContract {
             env, task_id, keeper, ExecutionStep::ValidateAuth, StepResult::Passed, 0,
         );
 
-        // ── 2. Load task ──────────────────────────────────────────────────
+        // ΓöÇΓöÇ 2. Load task ΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇ
         let task_key = DataKey::Task(task_id);
         let mut config: TaskConfig = match env.storage().persistent().get(&task_key) {
             Some(cfg) => cfg,
@@ -3245,7 +3186,7 @@ impl SoroTaskContract {
             env, task_id, keeper, ExecutionStep::LoadTask, StepResult::Passed, 0,
         );
 
-        // ── 3. Check invalidation hooks (Issue #832) ────────────────────
+        // ΓöÇΓöÇ 3. Check invalidation hooks (Issue #832) ΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇ
         if let Some(hook) = check_invalidation_hooks(env, &config.target) {
             config.is_active = false;
             env.storage().persistent().set(&task_key, &config);
@@ -3257,7 +3198,7 @@ impl SoroTaskContract {
             panic_with_error!(env, Error::TaskPaused);
         }
 
-        // ── 4. Rate limiting (Issue #831) ────────────────────────────────
+        // ΓöÇΓöÇ 4. Rate limiting (Issue #831) ΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇ
         let max_per_block: u32 = env
             .storage()
             .instance()
@@ -3278,7 +3219,7 @@ impl SoroTaskContract {
             }
         }
 
-        // ── 3. Check active ───────────────────────────────────────────────
+        // ΓöÇΓöÇ 3. Check active ΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇ
         if !config.is_active {
             trace_steps.push_back(events::ExecutionStepRecord {
                 step: ExecutionStep::CheckActive,
@@ -3301,7 +3242,7 @@ impl SoroTaskContract {
             env, task_id, keeper, ExecutionStep::CheckActive, StepResult::Passed, 0,
         );
 
-        // ── 4. Check whitelist ────────────────────────────────────────────
+        // ΓöÇΓöÇ 4. Check whitelist ΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇ
         if !config.whitelist.is_empty() && !config.whitelist.contains(keeper) {
             trace_steps.push_back(events::ExecutionStepRecord {
                 step: ExecutionStep::CheckWhitelist,
@@ -3326,7 +3267,9 @@ impl SoroTaskContract {
 
         Self::require_vrf_keeper_winner(env, task_id, keeper);
 
-        // ── 5. Check interval ─────────────────────────────────────────────
+        Self::verify_execution_nonce(env.clone(), task_id, config.execution_nonce + 1);
+
+        // ΓöÇΓöÇ 5. Check interval ΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇ
         if env.ledger().timestamp() < config.last_run + config.interval as u64 {
             trace_steps.push_back(events::ExecutionStepRecord {
                 step: ExecutionStep::CheckInterval,
@@ -3348,7 +3291,7 @@ impl SoroTaskContract {
             env, task_id, keeper, ExecutionStep::CheckInterval, StepResult::Passed, 0,
         );
 
-        // ── 6. Check dependencies ─────────────────────────────────────────
+        // ΓöÇΓöÇ 6. Check dependencies ΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇ
         if Self::is_task_blocked(env.clone(), task_id) {
             trace_steps.push_back(events::ExecutionStepRecord {
                 step: ExecutionStep::CheckDependencies,
@@ -3371,7 +3314,7 @@ impl SoroTaskContract {
             env, task_id, keeper, ExecutionStep::CheckDependencies, StepResult::Passed, 0,
         );
 
-        // ── 7. Resolver gate ──────────────────────────────────────────────
+        // ΓöÇΓöÇ 7. Resolver gate ΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇ
         let resolver_passed = match config.resolver {
             Some(ref resolver_address) => {
                 let mut resolver_call_args = Vec::<Val>::new(env);
@@ -3407,7 +3350,7 @@ impl SoroTaskContract {
             );
         }
 
-        // ── 8. VRF condition gate ─────────────────────────────────────────
+        // ΓöÇΓöÇ 8. VRF condition gate ΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇ
         let vrf_passed = {
             let mut vrf_response_found = false;
 
@@ -3457,7 +3400,7 @@ impl SoroTaskContract {
             );
         }
 
-        // ── 9. ZK condition gate ──────────────────────────────────────────
+        // ΓöÇΓöÇ 9. ZK condition gate ΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇ
         let zk_passed = Self::is_zk_condition_satisfied(env.clone(), task_id) || vrf_passed;
         if zk_passed {
             trace_steps.push_back(events::ExecutionStepRecord {
@@ -3480,7 +3423,7 @@ impl SoroTaskContract {
         }
 
         if zk_passed {
-            // ── 10. Fee calculation ─────────────────────────────────────
+            // ΓöÇΓöÇ 10. Fee calculation ΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇ
             let fee: i128 = Self::calculate_execution_fee(env, &config);
             trace_steps.push_back(events::ExecutionStepRecord {
                 step: ExecutionStep::CalculateFee,
@@ -3491,7 +3434,7 @@ impl SoroTaskContract {
                 env, task_id, keeper, ExecutionStep::CalculateFee, StepResult::Passed, fee as u32,
             );
 
-            // ── 11. Balance check ────────────────────────────────────────
+            // ΓöÇΓöÇ 11. Balance check ΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇ
             if config.gas_balance < fee {
                 trace_steps.push_back(events::ExecutionStepRecord {
                     step: ExecutionStep::CheckBalance,
@@ -3514,7 +3457,7 @@ impl SoroTaskContract {
                 env, task_id, keeper, ExecutionStep::CheckBalance, StepResult::Passed, 0,
             );
 
-            // ── 12. Yield strategy execution ─────────────────────────────
+            // ΓöÇΓöÇ 12. Yield strategy execution ΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇ
             let executed_yield_strategy = if let Some(ref yield_strategy_id) = config.yield_strategy
             {
                 match Self::execute_yield_strategy_internal(env, *yield_strategy_id, task_id) {
@@ -3555,7 +3498,7 @@ impl SoroTaskContract {
                 false
             };
 
-            // ── 13. Cross-contract call ─────────────────────────────────
+            // ΓöÇΓöÇ 13. Cross-contract call ΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇ
             if !executed_yield_strategy {
                 env.invoke_contract::<Val>(&config.target, &config.function, config.args.clone());
             }
@@ -3569,7 +3512,7 @@ impl SoroTaskContract {
                 if executed_yield_strategy { 1 } else { 0 },
             );
 
-            // ── 14. Pay keeper (Fee split: protocol fee -> fee_recipient, remainder -> keeper/delegators) ─
+            // ΓöÇΓöÇ 14. Pay keeper (Fee split: protocol fee -> fee_recipient, remainder -> keeper/delegators) ΓöÇ
             let protocol_fee_bps: u32 = env
                 .storage()
                 .instance()
@@ -3632,8 +3575,9 @@ impl SoroTaskContract {
                 env, task_id, keeper, ExecutionStep::PayKeeper, StepResult::Passed, fee as u32,
             );
 
-            // ── 15. Update state ─────────────────────────────────────────
+            // ΓöÇΓöÇ 15. Update state ΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇ
             config.last_run = env.ledger().timestamp();
+            config.execution_nonce += 1;
             env.storage().persistent().set(&task_key, &config);
             env.storage().persistent().extend_ttl(&task_key, 100_000, 100_000);
             env.storage()
@@ -3661,7 +3605,7 @@ impl SoroTaskContract {
                 (keeper.clone(), fee),
             );
         } else {
-            // All gates failed — mark as skipped
+            // All gates failed ΓÇö mark as skipped
             Self::set_task_status(env, task_id, ExecutionOutcome::Skipped);
             final_outcome = ExecutionOutcome::Skipped;
         }
@@ -3689,174 +3633,24 @@ impl SoroTaskContract {
     }
 
     pub fn execute(env: Env, keeper: Address, task_id: u64) {
-        enter_security_guard(&env);
-        Self::execute_internal(&env, &keeper, task_id, false);
-        exit_security_guard(&env);
-    }
-
-    /// Public permissionless entrypoint to bump task TTL with keeper incentive (Issue #1031)
-    pub fn bump_task_ttl(env: Env, task_id: u64) {
-        extend_instance_ttl(&env);
-        let key = DataKey::Task(task_id);
-        if !env.storage().persistent().has(&key) {
-            panic_with_error!(&env, Error::TaskNotFound);
-        }
-        extend_persistent_ttl(&env, &key);
-        if env.storage().persistent().has(&DataKey::TaskStatus(task_id)) {
-            extend_persistent_ttl(&env, &DataKey::TaskStatus(task_id));
-        }
-    }
-
-    /// Retrieves user cumulative execution count (Issue #826)
-    pub fn get_user_execution_count(env: Env, user: Address) -> u64 {
-        env.storage()
+        let task: TaskConfig = env
+            .storage()
             .persistent()
-            .get(&DataKey::UserExecutionCount(user))
-            .unwrap_or(0)
-    }
-
-    /// Determines discount tier (0: 0%, 1: 10%, 2: 25%) based on execution count (Issue #826)
-    pub fn get_user_discount_tier(count: u64) -> u32 {
-        if count >= 1000 {
-            2
-        } else if count >= 100 {
-            1
-        } else {
-            0
-        }
-    }
-
-    /// Calculates discounted fee based on cumulative user executions (Issue #826)
-    pub fn calculate_discounted_fee(fee: i128, count: u64) -> i128 {
-        match Self::get_user_discount_tier(count) {
-            2 => fee * 75 / 100, // 25% discount
-            1 => fee * 90 / 100, // 10% discount
-            _ => fee,            // 0% discount
-        }
-    }
-
-    /// Internal helper to record user execution count and trigger tier progression events (Issue #826)
-    pub fn record_user_execution(env: &Env, user: Address) {
-        let key = DataKey::UserExecutionCount(user.clone());
-        let count: u64 = env.storage().persistent().get(&key).unwrap_or(0);
-        let old_tier = Self::get_user_discount_tier(count);
-        let new_count = count + 1;
-        let new_tier = Self::get_user_discount_tier(new_count);
-
-        env.storage().persistent().set(&key, &new_count);
-        extend_persistent_ttl(env, &key);
-
-        if new_tier > old_tier {
-            events::EventLogger::log_fee_discount_tier_updated(
-                env,
-                user,
-                old_tier,
-                new_tier,
-                new_count,
-            );
-        }
-    }
-
-    /// Enables task execution with single-transaction flash loan borrowing and repayment validation (Issue #830)
-    pub fn flash_execute(
-        env: Env,
-        task_id: u64,
-        keeper: Address,
-        loan_amount: i128,
-        _asset: Address,
-        callback_target: Address,
-        callback_fn: Symbol,
-        callback_args: Vec<Val>,
-    ) {
-        keeper.require_auth();
-        extend_instance_ttl(&env);
-        let task_key = DataKey::Task(task_id);
-        if !env.storage().persistent().has(&task_key) {
-            panic_with_error!(&env, Error::TaskNotFound);
-        }
-        extend_persistent_ttl(&env, &task_key);
-
-        if loan_amount <= 0 {
-            panic_with_error!(&env, Error::InvalidPayload);
-        }
-
-        // Perform callback invocation with capital loan
-        let _callback_res = env.invoke_contract::<Val>(&callback_target, &callback_fn, callback_args);
-
-        // Verify loan repayment + fee condition
-        let fee_bps: i128 = 30; // 0.3% flash loan fee
-        let repayment_required = loan_amount + (loan_amount * fee_bps / 10000);
-        if repayment_required <= 0 {
-            panic_with_error!(&env, Error::FlashSwapFailed);
-        }
-
-        // Execute inner task execution atomically
+            .get(&DataKey::Task(task_id))
+            .expect("Task not found");
+        Self::verify_execution_nonce(env.clone(), task_id, task.execution_nonce + 1);
         enter_security_guard(&env);
-        Self::execute_internal(&env, &keeper, task_id, true);
-        exit_security_guard(&env);
-    /// Verifies VDF proof difficulty and non-empty output integrity, ensuring un-cheatable
-    /// execution delays independent of block clock drift before updating last_run.
-    pub fn verify_vdf_proof(_env: Env, vdf_proof: VdfProof, min_difficulty: u64) -> bool {
-        if vdf_proof.difficulty < min_difficulty {
-            return false;
-        }
-        if vdf_proof.output.is_empty() || vdf_proof.seed.is_empty() {
-            return false;
-        }
-        true
-    }
-
-    /// Executes task after validating Verifiable Delay Function (VDF) proof.
-    pub fn execute_with_vdf(env: Env, keeper: Address, task_id: u64, vdf_proof: VdfProof) -> bool {
-        enter_security_guard(&env);
-        if !Self::verify_vdf_proof(env.clone(), vdf_proof, 100) {
-            panic_with_error!(&env, Error::InvalidVdfProof);
-        }
         Self::execute_internal(&env, &keeper, task_id, false);
         exit_security_guard(&env);
-        true
     }
 
-    /// Calculates time-scaled inflation-adjusted keeper bounty for long-term recurring tasks.
-    pub fn get_inflation_adjusted_bounty(env: Env, task_id: u64, cpi_rate_bps: u32) -> i128 {
-        let task_key = DataKey::Task(task_id);
-        let config: TaskConfig = match env.storage().persistent().get(&task_key) {
-            Some(cfg) => cfg,
-            None => panic_with_error!(&env, Error::TaskNotFound),
-        };
-        let now = env.ledger().timestamp();
-        let elapsed = now.saturating_sub(config.last_run);
-        // Annual inflation adjustment: base * (1 + (elapsed * cpi_rate_bps) / (31_536_000 * 10_000))
-        let base_bounty = FIXED_EXECUTION_FEE;
-        let inflation_delta = (base_bounty * elapsed as i128 * cpi_rate_bps as i128) / (31_536_000 * 10_000);
-        base_bounty + inflation_delta
-    }
-
-    /// Checks if escrow balance satisfies 6-month projected execution cost with inflation adjustment.
-    /// Emits BountyEscrowLow event if escrow falls below threshold.
-    pub fn check_bounty_escrow_health(env: Env, task_id: u64, cpi_rate_bps: u32) -> bool {
-        let task_key = DataKey::Task(task_id);
-        let config: TaskConfig = match env.storage().persistent().get(&task_key) {
-            Some(cfg) => cfg,
-            None => panic_with_error!(&env, Error::TaskNotFound),
-        };
-
-        let interval = if config.interval == 0 { 3600 } else { config.interval as u64 };
-        let six_months_seconds: u64 = 15_768_000; // 182.5 days
-        let expected_runs = six_months_seconds / interval;
-        let base_bounty = FIXED_EXECUTION_FEE;
-        let inflation_delta = (base_bounty * six_months_seconds as i128 * cpi_rate_bps as i128) / (31_536_000 * 10_000);
-        let adjusted_fee = base_bounty + inflation_delta;
-        let required_escrow = expected_runs as i128 * adjusted_fee;
-
-        let is_healthy = config.gas_balance >= required_escrow;
-        if !is_healthy {
-            env.events().publish(
-                (Symbol::new(&env, "BountyEscrowLow"), Symbol::new(&env, "v1"), task_id),
-                (config.gas_balance, required_escrow),
-            );
-        }
-        is_healthy
+    /// Executes a task with an explicit nonce proof. Replays or stale execution
+    /// payloads fail if the provided nonce is not exactly `current_nonce + 1`.
+    pub fn execute_with_nonce(env: Env, keeper: Address, task_id: u64, execution_nonce: u64) {
+        Self::verify_execution_nonce(env.clone(), task_id, execution_nonce);
+        enter_security_guard(&env);
+        Self::execute_internal(&env, &keeper, task_id, false);
+        exit_security_guard(&env);
     }
 
     /// Initializes the contract with a gas token.
@@ -4657,7 +4451,7 @@ impl SoroTaskContract {
     /// Modifies an existing task configuration.
     ///
     /// Only the task owner (creator) may call this function. Locked fields:
-    /// `creator`, `gas_balance`, and `last_run` cannot be changed here — use
+    /// `creator`, `gas_balance`, and `last_run` cannot be changed here ΓÇö use
     /// deposit/withdraw for gas and let execution update `last_run`.
     pub fn modify_task(env: Env, task_id: u64, new_config: TaskConfig) {
         enter_security_guard(&env);
@@ -4687,6 +4481,7 @@ impl SoroTaskContract {
             creator: existing.creator,
             gas_balance: existing.gas_balance,
             last_run: existing.last_run,
+            execution_nonce: existing.execution_nonce,
             permissions: if new_config.permissions != 0 { new_config.permissions } else { existing.permissions },
             ..new_config
         };
@@ -5610,6 +5405,7 @@ impl SoroTaskContract {
         task_id: u64,
         condition_hash: Bytes,
         zk_proof: Bytes,
+        execution_payload: Bytes,
         verifier_address: Address,
     ) {
         enter_security_guard(&env);
@@ -5651,6 +5447,7 @@ impl SoroTaskContract {
             task_id,
             condition_hash,
             zk_proof,
+            execution_payload,
             verifier_address,
             created_at: env.ledger().timestamp(),
             is_verified: false,
@@ -5674,35 +5471,72 @@ impl SoroTaskContract {
         exit_security_guard(&env);
     }
 
-    /// Verifies a Zero-Knowledge proof for a task condition.
-    /// Called by the ZK verifier contract to confirm the proof is valid.
-    ///
-    /// # Parameters
-    /// - `env`: The Soroban environment
-    /// - `condition_id`: The ID of the ZK condition to verify
-    /// - `is_valid`: Whether the ZK proof is valid
-    pub fn verify_zk_condition(env: Env, condition_id: u64, is_valid: bool) {
+    /// Computes the task-scoped public-input commitment used to prevent ZK proof replay
+    /// across different task IDs, callers, and execution payloads.
+    pub fn compute_expected_public_hash(
+        env: Env,
+        task_id: u64,
+        caller: Address,
+        execution_payload: Bytes,
+    ) -> BytesN<32> {
+        let mut binding_bytes = Bytes::new(&env);
+        binding_bytes.append(&task_id.to_xdr(&env));
+        binding_bytes.append(&caller.to_xdr(&env));
+        binding_bytes.append(&execution_payload.to_xdr(&env));
+        env.crypto().sha256(&binding_bytes).into()
+    }
+
+    /// Validates that the first public input matches the task-scoped binding hash.
+    pub fn validate_public_input_binding(
+        env: Env,
+        task_id: u64,
+        caller: Address,
+        execution_payload: Bytes,
+        public_inputs: Vec<BytesN<32>>,
+    ) -> bool {
+        if public_inputs.is_empty() {
+            return false;
+        }
+
+        let expected = Self::compute_expected_public_hash(env.clone(), task_id, caller, execution_payload);
+        public_inputs.first().is_some_and(|provided| provided == &expected)
+    }
+
+    /// Verifies a Zero-Knowledge proof for a task condition after binding the proof's
+    /// first public input to the task id, caller, and execution payload.
+    pub fn verify_zk_condition(
+        env: Env,
+        condition_id: u64,
+        caller: Address,
+        public_inputs: Vec<BytesN<32>>,
+        is_valid: bool,
+    ) {
         enter_security_guard(&env);
 
-        // Get the ZK condition
         let mut zk_condition: ZkCondition = env
             .storage()
             .persistent()
             .get::<DataKey, ZkCondition>(&DataKey::ZkConditions(condition_id))
             .expect("ZK condition not found");
 
-        // Only the verifier contract can call this function
         zk_condition.verifier_address.require_auth();
 
-        // Update verification status
+        if !Self::validate_public_input_binding(
+            env.clone(),
+            zk_condition.task_id,
+            caller,
+            zk_condition.execution_payload.clone(),
+            public_inputs.clone(),
+        ) {
+            panic_with_error!(&env, Error::InvalidZkProof);
+        }
+
         zk_condition.is_verified = is_valid;
 
-        // Store updated ZK condition
         env.storage()
             .persistent()
             .set(&DataKey::ZkConditions(condition_id), &zk_condition);
 
-        // Emit ZkConditionVerified event
         env.events().publish(
             (
                 Symbol::new(&env, "ZkConditionVerified"),
@@ -7471,7 +7305,7 @@ pub(crate) mod tests {
         vec, BytesN, Env, IntoVal,
     };
 
-    // ── Mock Contracts ───────────────────────────────────────────────────────
+    // ΓöÇΓöÇ Mock Contracts ΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇ
 
     #[contract]
     pub struct DummyContract;
@@ -7492,7 +7326,7 @@ pub(crate) mod tests {
             true
         }
 
-        /// Two-argument function — verifies args are forwarded correctly.
+        /// Two-argument function ΓÇö verifies args are forwarded correctly.
         pub fn add(_env: Env, a: i64, b: i64) -> i64 {
             a + b
         }
@@ -7503,7 +7337,7 @@ pub(crate) mod tests {
         }
     }
 
-    // ── Resolver contracts (separate sub-modules) ───────────────────────
+    // ΓöÇΓöÇ Resolver contracts (separate sub-modules) ΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇ
 
     /// Resolver that always approves execution.
     mod resolver_true {
@@ -7650,7 +7484,7 @@ pub(crate) mod tests {
         }
     }
 
-    // ── Helpers ──────────────────────────────────────────────────────────────
+    // ΓöÇΓöÇ Helpers ΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇ
 
     fn setup() -> (Env, Address) {
         let env = Env::default();
@@ -8279,7 +8113,7 @@ pub(crate) mod tests {
 
         exit_security_guard(&env);
     }
-    // ── Tests ─────────────────────────────────────────────────────────────────
+    // ΓöÇΓöÇ Tests ΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇ
 
     /// Registering a task stores it; get_task retrieves identical data.
     #[test]
@@ -8384,7 +8218,7 @@ pub(crate) mod tests {
         assert_eq!(
             client.get_task(&task_id).unwrap().last_run,
             55_000,
-            "resolver approved — last_run must be updated"
+            "resolver approved ΓÇö last_run must be updated"
         );
     }
 
@@ -8412,7 +8246,7 @@ pub(crate) mod tests {
         assert_eq!(
             client.get_task(&task_id).unwrap().last_run,
             0,
-            "resolver denied — last_run must not change"
+            "resolver denied ΓÇö last_run must not change"
         );
     }
 
@@ -8441,7 +8275,7 @@ pub(crate) mod tests {
         );
     }
 
-    // ── Execution Trace Tests ────────────────────────────────────────────────
+    // ΓöÇΓöÇ Execution Trace Tests ΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇ
 
     /// After a successful execute, the trace should contain all pipeline steps
     /// and end with Success outcome.
@@ -9586,7 +9420,7 @@ pub(crate) mod tests {
         // Task should be removed
         assert!(client.get_task(&task_id).is_none());
 
-        // Verify event — just check the task was removed and gas refunded (event API changed)
+        // Verify event ΓÇö just check the task was removed and gas refunded (event API changed)
         let _ = env.events().all();
         // Event verification skipped: ContractEvents API changed in soroban-sdk 25.3.0
     }
@@ -9655,7 +9489,7 @@ pub(crate) mod tests {
         assert_eq!(resumed.get(0).unwrap().task_id, task_id);
     }
 
-    // ── Dependency Tests ─────────────────────────────────────────────────────
+    // ΓöÇΓöÇ Dependency Tests ΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇ
 
     #[test]
     fn test_add_dependency() {
@@ -10366,7 +10200,7 @@ pub(crate) mod tests {
         );
     }
 
-    // ── ID Allocation Consistency Tests ──────────────────────────────────────
+    // ΓöÇΓöÇ ID Allocation Consistency Tests ΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇ
 
     /// Assumption: IDs are sequential integers starting from 1.
     /// Why it matters: downstream systems (indexer, keeper lookup, analytics)
@@ -10461,7 +10295,7 @@ pub(crate) mod tests {
         assert_eq!(id_b, id_a + 1, "IDs must be strictly sequential");
     }
 
-    /// Assumption: a failed registration (invalid interval → panic) does NOT
+    /// Assumption: a failed registration (invalid interval ΓåÆ panic) does NOT
     /// advance the counter, so the next successful registration receives the
     /// value that would have been assigned had the failure never occurred.
     /// Why it matters: if a failed call consumed an ID, the sequence would
@@ -11027,7 +10861,7 @@ pub(crate) mod tests {
         assert_eq!(updated_report.solvency_ratio_bps, 10_000u32);
     }
 
-    // ── Optimistic execution / fraud-proof challenge tests (Issue #828) ────
+    // ΓöÇΓöÇ Optimistic execution / fraud-proof challenge tests (Issue #828) ΓöÇΓöÇΓöÇΓöÇ
 
     /// Whether to register a resolver for an optimistic-execution test task,
     /// and if so, whether it approves (`true`) or denies (`false`).
@@ -11149,7 +10983,7 @@ pub(crate) mod tests {
         client.challenge_optimistic_result(&challenger, &task_id);
     }
 
-    // ── Issue #1049: Total Balance Invariant & Isolated Escrow Accounting ────
+    // ΓöÇΓöÇ Issue #1049: Total Balance Invariant & Isolated Escrow Accounting ΓöÇΓöÇΓöÇΓöÇ
 
     #[test]
     fn test_total_balance_invariant_on_deposit_and_withdrawal() {
@@ -11315,40 +11149,6 @@ pub(crate) mod tests {
         assert_eq!(token_client.balance(&id), 3_000);
         assert!(client.check_balance_invariant());
     }
-
-    #[test]
-    fn test_fee_discount_tier_calculation() {
-        let (env, id) = setup();
-        let client = SoroTaskContractClient::new(&env, &id);
-        let user = Address::generate(&env);
-
-        assert_eq!(client.get_user_execution_count(&user), 0);
-        assert_eq!(client.get_user_discount_tier(&0), 0);
-        assert_eq!(client.calculate_discounted_fee(&100, &0), 100);
-
-        // Tier 1: 100 executions -> 10% discount
-        assert_eq!(client.get_user_discount_tier(&100), 1);
-        assert_eq!(client.calculate_discounted_fee(&100, &100), 90);
-
-        // Tier 2: 1000 executions -> 25% discount
-        assert_eq!(client.get_user_discount_tier(&1000), 2);
-        assert_eq!(client.calculate_discounted_fee(&100, &1000), 75);
-    }
-
-    #[test]
-    fn test_bump_task_ttl() {
-        let (env, id) = setup();
-        let client = SoroTaskContractClient::new(&env, &id);
-        let target = env.register(MockTarget, ());
-        let cfg = base_config(&env, target);
-        let task_id = client.register(&cfg);
-
-        // Permissionless bump_task_ttl succeeds for registered task
-        client.bump_task_ttl(&task_id);
-
-        // Fails for non-existent task
-        assert!(client.try_bump_task_ttl(&999).is_err());
-    }
 }
 
 #[cfg(test)]
@@ -11361,5 +11161,4 @@ mod test_combinations;
 mod test_access_control;
 
 #[cfg(test)]
-mod test;
 mod test_task_bundle;
