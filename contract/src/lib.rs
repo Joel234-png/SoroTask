@@ -95,6 +95,9 @@ pub enum Error {
     VolatilityExceeded = 62,
     VolatilityCircuitBreakerTripped = 63,
     VolatilityTimelockActive = 64,
+    UnpauseNotProposed = 65,
+    UnpauseTimelockActive = 66,
+    InvalidPauseThreshold = 67,
 }
 
 #[contracttype]
@@ -198,6 +201,9 @@ const MIN_OPTIMISTIC_BOND: i128 = 100;
 /// State Archival TTL Extension Thresholds (Issue #1031)
 pub const MIN_THRESHOLD_LEDGERS: u32 = 100_000;
 pub const EXTEND_TO_LEDGERS: u32 = 500_000;
+/// Delay between a governance-approved unpause proposal reaching quorum and
+/// when it becomes executable via `execute_unpause` (Issue #774).
+pub const UNPAUSE_TIMELOCK_SECONDS: u64 = 86_400;
 
 /// Permission Bitmask Flags for Task RBAC
 pub const PERM_CAN_PAUSE: u32 = 1;
@@ -892,6 +898,12 @@ pub enum DataKey {
     Guardians,
     PauseSignatures,
     EmergencyPauseState,
+    /// Configurable K-of-N threshold for `emergency_pause` guardian signatures (Issue #774)
+    PauseThreshold,
+    /// Timestamp at which a pending governance-approved unpause becomes executable
+    UnpauseTimelock,
+    /// Whether a governance unpause proposal is currently pending
+    UnpauseProposed,
     Task(u64),
     Counter,
     ActiveTasks,
@@ -1759,6 +1771,37 @@ impl SoroTaskContract {
             .unwrap_or_else(|| Vec::new(&env))
     }
 
+    /// Sets the K in the K-of-N guardian signature threshold required to
+    /// trigger `emergency_pause`/`propose_unpause`. Admin-gated. (Issue #774)
+    pub fn set_pause_threshold(env: Env, admin: Address, threshold: u32) -> Result<(), Error> {
+        if threshold == 0 {
+            return Err(Error::InvalidPauseThreshold);
+        }
+        if let Some(configured_admin) = env
+            .storage()
+            .persistent()
+            .get::<DataKey, Address>(&DataKey::AdminAddress)
+        {
+            configured_admin.require_auth();
+            if configured_admin != admin {
+                return Err(Error::Unauthorized);
+            }
+        } else {
+            admin.require_auth();
+        }
+        env.storage()
+            .persistent()
+            .set(&DataKey::PauseThreshold, &threshold);
+        Ok(())
+    }
+
+    fn pause_threshold(env: &Env) -> u32 {
+        env.storage()
+            .persistent()
+            .get(&DataKey::PauseThreshold)
+            .unwrap_or(3)
+    }
+
     pub fn emergency_pause(env: Env, guardian: Address) -> bool {
         guardian.require_auth();
         let guardians: Vec<Address> = env
@@ -1804,7 +1847,7 @@ impl SoroTaskContract {
                 .set(&DataKey::PauseSignatures, &sigs);
         }
 
-        if sigs.len() >= 3 {
+        if sigs.len() >= Self::pause_threshold(&env) {
             let state = EmergencyPauseState {
                 is_paused: true,
                 paused_at: env.ledger().timestamp(),
@@ -1847,14 +1890,101 @@ impl SoroTaskContract {
         false
     }
 
-    pub fn unpause_protocol(env: Env) {
-        if let Some(admin) = env
+    /// Guardian-signed proposal to lift an emergency pause. Requires the same
+    /// K-of-N guardian threshold as `emergency_pause`. Once the threshold is
+    /// reached, starts a governance timelock; `execute_unpause` may only be
+    /// called after it elapses. (Issue #774)
+    pub fn propose_unpause(env: Env, guardian: Address) -> bool {
+        guardian.require_auth();
+        let guardians: Vec<Address> = env
+            .storage()
+            .persistent()
+            .get(&DataKey::Guardians)
+            .unwrap_or_else(|| Vec::new(&env));
+
+        let mut is_guardian = false;
+        let mut i = 0;
+        while i < guardians.len() {
+            if guardians.get(i).unwrap() == guardian {
+                is_guardian = true;
+                break;
+            }
+            i += 1;
+        }
+        if !is_guardian {
+            panic_with_error!(&env, Error::Unauthorized);
+        }
+
+        let mut sigs: Vec<Address> = env
+            .storage()
+            .persistent()
+            .get(&DataKey::PauseSignatures)
+            .unwrap_or_else(|| Vec::new(&env));
+
+        let mut already_signed = false;
+        let mut j = 0;
+        while j < sigs.len() {
+            if sigs.get(j).unwrap() == guardian {
+                already_signed = true;
+                break;
+            }
+            j += 1;
+        }
+        if !already_signed {
+            sigs.push_back(guardian);
+            env.storage()
+                .persistent()
+                .set(&DataKey::PauseSignatures, &sigs);
+        }
+
+        if sigs.len() >= Self::pause_threshold(&env) {
+            let timelock = env.ledger().timestamp().saturating_add(UNPAUSE_TIMELOCK_SECONDS);
+            env.storage()
+                .persistent()
+                .set(&DataKey::UnpauseTimelock, &timelock);
+            env.storage()
+                .persistent()
+                .set(&DataKey::UnpauseProposed, &true);
+            true
+        } else {
+            false
+        }
+    }
+
+    /// Executes a previously-approved unpause once its governance timelock
+    /// has elapsed. Admin-gated. (Issue #774)
+    pub fn execute_unpause(env: Env, admin: Address) -> Result<(), Error> {
+        if let Some(configured_admin) = env
             .storage()
             .persistent()
             .get::<DataKey, Address>(&DataKey::AdminAddress)
         {
+            configured_admin.require_auth();
+            if configured_admin != admin {
+                return Err(Error::Unauthorized);
+            }
+        } else {
             admin.require_auth();
         }
+
+        let proposed: bool = env
+            .storage()
+            .persistent()
+            .get(&DataKey::UnpauseProposed)
+            .unwrap_or(false);
+        if !proposed {
+            return Err(Error::UnpauseNotProposed);
+        }
+
+        let timelock: u64 = env
+            .storage()
+            .persistent()
+            .get(&DataKey::UnpauseTimelock)
+            .unwrap_or(u64::MAX);
+        if env.ledger().timestamp() < timelock {
+            return Err(Error::UnpauseTimelockActive);
+        }
+
         let state = EmergencyPauseState {
             is_paused: false,
             paused_at: 0,
@@ -1867,6 +1997,11 @@ impl SoroTaskContract {
         env.storage()
             .persistent()
             .set(&DataKey::PauseSignatures, &empty_sigs);
+        env.storage()
+            .persistent()
+            .set(&DataKey::UnpauseProposed, &false);
+        env.storage().persistent().remove(&DataKey::UnpauseTimelock);
+        Ok(())
     }
 
     pub fn extend_emergency_pause(env: Env, additional_seconds: u64) {
