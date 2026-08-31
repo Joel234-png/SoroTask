@@ -2112,6 +2112,12 @@ impl SoroTaskContract {
         if config.permissions == 0 {
             config.permissions = PERM_CAN_PAUSE | PERM_CAN_UPDATE | PERM_CAN_CANCEL | PERM_CAN_DEPOSIT;
         }
+        // Dependency edges must go through `add_dependency`/`add_dependency_with_rule`,
+        // which enforce cycle detection and MAX_DEPENDENCY_DEPTH. A caller-supplied
+        // `blocked_by` at registration time would bypass those checks entirely
+        // (e.g. a self-reference or a cycle among not-yet-existing task IDs), so
+        // it is ignored here (Issue #776).
+        config.blocked_by = Vec::new(&env);
 
         // Allocate next sequential ID:
         // 1. Fetch current counter (defaults to 0 if first registration)
