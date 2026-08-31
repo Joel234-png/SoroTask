@@ -156,21 +156,6 @@ function createApp(zkService, options = {}) {
     return res.json(job);
   });
 
-  app.get('/proofs/:jobId/stream', async (req, res) => {
-    const { jobId } = req.params;
-    const job = await zkService.getAsyncJob(jobId);
-    res.setHeader('Content-Type', 'text/event-stream');
-    res.setHeader('Cache-Control', 'no-cache');
-    res.setHeader('Connection', 'keep-alive');
-
-    if (!job) {
-      res.write(`event: error\ndata: ${JSON.stringify({ error: 'Job not found', jobId })}\n\n`);
-      return res.end();
-    }
-
-    res.write(`event: status\ndata: ${JSON.stringify(job)}\n\n`);
-    return res.end();
-  });
 
   app.post('/generate-proof', generateProofLimiter, authenticate, async (req, res) => {
     const { taskId, circuitId, circuitVersion, taskCondition, clientData, encryptedWitness, privateKeyPem } = req.body || {};
@@ -453,16 +438,6 @@ function createApp(zkService, options = {}) {
   });
 
   app.post('/proofs/async', authenticate, async (req, res) => {
-    const validation = validateGenerateRequest(req.body || {});
-    if (!validation.valid) {
-      if (validation.missingFields) {
-        return sendError(res, 400, 'INVALID_INPUT', 'taskCondition and clientData are required', {
-          missingFields: validation.missingFields,
-        });
-      }
-      return sendError(res, 400, 'INVALID_INPUT', validation.message);
-    }
-
     if (!zkService.isReady) {
       return sendError(res, 503, 'SERVICE_NOT_READY', 'ZK proof worker pool is not initialized');
     }
@@ -492,14 +467,14 @@ function createApp(zkService, options = {}) {
     }
   });
 
-  app.get('/proofs/:job_id/stream', (req, res) => {
+  app.get('/proofs/:job_id/stream', async (req, res) => {
     const { job_id: jobId } = req.params;
 
     res.setHeader('Content-Type', 'text/event-stream');
     res.setHeader('Cache-Control', 'no-cache');
     res.setHeader('Connection', 'keep-alive');
 
-    const job = zkService.getAsyncJob(jobId);
+    const job = await zkService.getAsyncJob(jobId);
     if (!job) {
       res.write(`event: error\ndata: ${JSON.stringify({ error: 'Job not found', jobId })}\n\n`);
       return res.end();

@@ -95,6 +95,78 @@ pub enum Error {
     /// refund_inactive_task (Issue #777): the task hasn't been inactive
     /// long enough yet (see INACTIVE_TASK_ABANDONMENT_SECONDS).
     AbandonmentPeriodNotElapsed = 66,
+    // ── 100..199: Authorization & Role-Based Access ──────────────────────────────
+    Unauthorized = 100,
+    UnauthorizedSlasher = 101,
+    OperatorAlreadySet = 102,
+    NotInitialized = 103,
+    AlreadyInitialized = 104,
+    FeatureDisabled = 105,
+    InsufficientDelegation = 106,
+    InvalidCommissionRate = 107,
+
+    // ── 200..299: Task Lifecycle & Validation ────────────────────────────────────
+    InvalidInterval = 200,
+    TaskPaused = 201,
+    TaskAlreadyPaused = 202,
+    TaskAlreadyActive = 203,
+    TaskNotFound = 204,
+    DuplicateTask = 205,
+    InvalidPayload = 206,
+    ArgsTooMany = 207,
+    ArgsTooLarge = 208,
+    BountyBelowMinimum = 209,
+    InvalidBounty = 210,
+    InvalidUpgradeVersion = 211,
+    InvalidInsurancePolicy = 212,
+
+    // ── 300..399: Execution, Dependency & Reentrancy ─────────────────────────────
+    ReentrantCall = 300,
+    SelfDependency = 301,
+    DependencyNotFound = 302,
+    CircularDependency = 303,
+    DependencyBlocked = 304,
+    DependencyLimitExceeded = 305,
+    DependencyDepthExceeded = 306,
+    KeeperStakeTooLow = 307,
+    EmptyBundle = 308,
+    BundleTooLarge = 309,
+    BundleStepFailed = 310,
+    BlockExecutionLimitReached = 311,
+    DecryptionFailed = 312,
+    OptimisticClaimPending = 313,
+    NoOptimisticClaim = 314,
+    ChallengeWindowClosed = 315,
+    ChallengeWindowActive = 316,
+    FraudProofInvalid = 317,
+
+    // ── 400..499: Oracles, VRF & ZK Verifier ─────────────────────────────────────
+    OracleNotSet = 400,
+    OracleRequestFailed = 401,
+    OracleInvalidResponse = 402,
+    OracleTimeout = 403,
+    OracleUnsupportedProvider = 404,
+    VrfOracleNotSet = 405,
+    InvalidVrfRequest = 406,
+    VrfRequestFailed = 407,
+    VrfAlreadyFulfilled = 408,
+    InvalidZkProof = 409,
+    InvalidVdfProof = 410,
+
+    // ── 500..599: Yield, Flash Swaps & Treasury ──────────────────────────────────
+    InsufficientBalance = 500,
+    YieldStrategyNotInitialized = 501,
+    InvalidYieldStrategy = 502,
+    YieldHarvestFailed = 503,
+    InsufficientYield = 504,
+    FlashSwapFailed = 505,
+    InsufficientFlashProfit = 506,
+    InvalidSlippage = 507,
+
+    // ── 600..699: Volatility & Circuit Breakers ──────────────────────────────────
+    VolatilityExceeded = 600,
+    VolatilityCircuitBreakerTripped = 601,
+    VolatilityTimelockActive = 602,
 }
 
 #[contracttype]
@@ -1008,16 +1080,34 @@ pub enum DataKey {
     TotalUnclaimedFees,
 }
 
+/// Transient storage reentrancy guard ensuring reentrant calls revert immediately.
+pub struct ReentrancyGuard<'a>(&'a Env);
+
+impl<'a> ReentrancyGuard<'a> {
+    pub fn new(env: &'a Env) -> Self {
+        enter_security_guard(env);
+        Self(env)
+    }
+}
+
+impl<'a> Drop for ReentrancyGuard<'a> {
+    fn drop(&mut self) {
+        exit_security_guard(self.0);
+    }
+}
+
 fn enter_security_guard(env: &Env) {
     let key = DataKey::ReentrancyLock;
-    if env.storage().instance().has(&key) {
+    if env.storage().temporary().has(&key) || env.storage().instance().has(&key) {
         panic_with_error!(env, Error::ReentrantCall);
     }
+    env.storage().temporary().set(&key, &true);
     env.storage().instance().set(&key, &true);
 }
 
 fn exit_security_guard(env: &Env) {
     let key = DataKey::ReentrancyLock;
+    env.storage().temporary().remove(&key);
     env.storage().instance().remove(&key);
 }
 
@@ -3802,6 +3892,8 @@ impl SoroTaskContract {
         enter_security_guard(&env);
         Self::execute_internal(&env, &keeper, task_id, true);
         exit_security_guard(&env);
+    }
+
     /// Verifies VDF proof difficulty and non-empty output integrity, ensuring un-cheatable
     /// execution delays independent of block clock drift before updating last_run.
     pub fn verify_vdf_proof(_env: Env, vdf_proof: VdfProof, min_difficulty: u64) -> bool {
@@ -7198,6 +7290,10 @@ impl SoroTaskContract {
             panic_with_error!(&env, Error::InvalidPayload);
         }
 
+        if params.flash_fee_bps > 10_000 {
+            panic_with_error!(&env, Error::InvalidSlippage);
+        }
+
         let flash_fee = (params.amount_borrow * params.flash_fee_bps as i128) / 10_000;
         let total_repay = params.amount_borrow + flash_fee;
 
@@ -7641,6 +7737,9 @@ pub(crate) mod tests {
 
     #[contractimpl]
     impl MockTarget {
+        /// Zero-argument smoke-test function.
+        pub fn hello(_env: Env) {}
+
         /// Zero-argument smoke-test function.
         pub fn ping(_env: Env) -> bool {
             true
@@ -9117,7 +9216,7 @@ pub(crate) mod tests {
         };
 
         let result = client.try_register(&config);
-        assert_eq!(result, Err(Ok(soroban_sdk::Error::from_contract_error(1))));
+        assert_eq!(result, Err(Ok(soroban_sdk::Error::from_contract_error(Error::InvalidInterval as u32))));
     }
 
     #[test]
@@ -9321,7 +9420,7 @@ pub(crate) mod tests {
 
         set_timestamp(&env, 12_345);
         let result = client.try_execute(&unauthorized_keeper, &task_id);
-        assert_eq!(result, Err(Ok(soroban_sdk::Error::from_contract_error(2))));
+        assert_eq!(result, Err(Ok(soroban_sdk::Error::from_contract_error(Error::Unauthorized as u32))));
     }
 
     #[test]
@@ -9582,7 +9681,7 @@ pub(crate) mod tests {
     }
 
     #[test]
-    #[should_panic(expected = "Error(Contract, #45)")]
+    #[should_panic(expected = "Error(Contract, #507)")]
     fn test_set_keeper_payout_preference_rejects_invalid_slippage() {
         let (env, id) = setup();
         let client = SoroTaskContractClient::new(&env, &id);
@@ -11228,7 +11327,7 @@ pub(crate) mod tests {
     }
 
     #[test]
-    #[should_panic(expected = "Error(Contract, #14)")]
+    #[should_panic(expected = "Error(Contract, #307)")]
     fn test_submit_optimistic_result_requires_min_bond() {
         let (_env, client, task_id, keeper) = setup_optimistic_task(OptimisticResolver::None);
         client.submit_optimistic_result(&keeper, &task_id, &true, &10);
@@ -11252,7 +11351,7 @@ pub(crate) mod tests {
     }
 
     #[test]
-    #[should_panic(expected = "Error(Contract, #49)")]
+    #[should_panic(expected = "Error(Contract, #316)")]
     fn test_finalize_optimistic_result_before_window_reverts() {
         let (_env, client, task_id, keeper) = setup_optimistic_task(OptimisticResolver::None);
         client.submit_optimistic_result(&keeper, &task_id, &true, &100);
@@ -11282,7 +11381,7 @@ pub(crate) mod tests {
     }
 
     #[test]
-    #[should_panic(expected = "Error(Contract, #50)")]
+    #[should_panic(expected = "Error(Contract, #317)")]
     fn test_challenge_optimistic_result_reverts_when_claim_is_honest() {
         let (env, client, task_id, keeper) =
             setup_optimistic_task(OptimisticResolver::AlwaysTrue);
@@ -11292,7 +11391,7 @@ pub(crate) mod tests {
     }
 
     #[test]
-    #[should_panic(expected = "Error(Contract, #48)")]
+    #[should_panic(expected = "Error(Contract, #315)")]
     fn test_challenge_optimistic_result_after_window_reverts() {
         let (env, client, task_id, keeper) =
             setup_optimistic_task(OptimisticResolver::AlwaysFalse);
@@ -11395,6 +11494,15 @@ pub(crate) mod tests {
 
         let admin = Address::generate(&env);
         client.set_admin_address(&admin);
+        let fee_config = TokenomicsConfig {
+            staking_reward_rate: 500,
+            governance_quorum_percentage: 1000,
+            governance_voting_period: 3_600_000,
+            fee_model: FeeModel::Fixed,
+            min_fee: 100,
+            max_fee: 100,
+        };
+        client.init_tokenomics_config(&fee_config);
         let fee_recipient = Address::generate(&env);
         client.set_fee_recipient(&fee_recipient);
         client.set_protocol_fee_bps(&1000); // 10% protocol fee
@@ -11410,7 +11518,8 @@ pub(crate) mod tests {
         assert_eq!(client.get_total_task_escrows(), 5_000);
         assert!(client.check_balance_invariant());
 
-        // Execute task
+        // Execute task (advance timestamp exactly to interval)
+        set_timestamp(&env, 3_600);
         let keeper = Address::generate(&env);
         client.execute(&keeper, &task_id);
 
