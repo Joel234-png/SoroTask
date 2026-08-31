@@ -28,6 +28,7 @@ const { GracefulShutdownManager } = require("./src/gracefulShutdown");
 const { TaskReconciler } = require("./src/reconciler");
 const { createDefaultFilterChain } = require("./src/taskFilter");
 const { getRedisClient } = require("./src/lock");
+const { withSpan } = require("./src/otel");
 
 // Create root logger for the main module
 const logger = createLogger("keeper");
@@ -451,16 +452,25 @@ async function main() {
       deps.dynamicFeeMultiplier = dynamicFeeMultiplier;
       deps.gasMonitor = gasMonitor;
 
-      const retryResult = await executeTaskWithRetry(taskId, deps, {
-        attemptId: context.attemptId,
-        correlationId,
-        logger: taskLogger,
-        onRetry: (_error, _attempt, _delay, retryContext) => {
-          idempotencyGuard.touchRetry(taskId, {
-            lastError: retryContext?.message || null,
-          });
-        },
-      });
+      const retryResult = await withSpan(
+        'task_execute',
+        (span) => executeTaskWithRetry(taskId, deps, {
+          attemptId: context.attemptId,
+          correlationId,
+          logger: taskLogger,
+          onRetry: (_error, _attempt, _delay, retryContext) => {
+            span.addEvent('retry', { message: retryContext?.message || '' });
+            idempotencyGuard.touchRetry(taskId, {
+              lastError: retryContext?.message || null,
+            });
+          },
+        }).then((result) => {
+          span.setAttribute('txHash', result.result?.txHash || '');
+          span.setAttribute('retries', result.retries || 0);
+          return result;
+        }),
+        { taskId: String(taskId), correlationId: correlationId || '' },
+      );
 
       context.executionResult = retryResult;
       taskLogger.info("Task execution completed", {
@@ -853,11 +863,15 @@ async function main() {
 
       // Poll for due tasks
       // Pass registry so cached gas/timing filters can read previously fetched values
-      const dueTaskIds = await poller.pollDueTasks(shardSelection.ownedTaskIds, {
-        registry,
-        idempotencyGuard,
-        includeContext: true,
-      });
+      const dueTaskIds = await withSpan(
+        'poll_cycle',
+        () => poller.pollDueTasks(shardSelection.ownedTaskIds, {
+          registry,
+          idempotencyGuard,
+          includeContext: true,
+        }),
+        { ownedTaskCount: shardSelection.ownedTaskIds.length },
+      );
 
       if (dueTaskIds.length > 0) {
         const lockSnapshot = idempotencyGuard.getSnapshot();
