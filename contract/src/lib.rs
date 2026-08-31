@@ -3,6 +3,7 @@
 mod monolith;
 
 pub mod access;
+pub mod packed_args;
 pub mod events;
 pub mod execution;
 pub mod oracle;
@@ -2028,7 +2029,13 @@ impl SoroTaskContract {
 
     /// Validates task payload arguments for size and structure.
     /// Returns Ok(()) if valid, or an error code if validation fails.
-    fn validate_args(args: &Vec<Val>) -> Result<(), Error> {
+    ///
+    /// Uses the actual XDR-serialized byte length rather than a fixed
+    /// 64-bytes-per-arg upper bound, so compact payloads (e.g. a single
+    /// small integer) aren't over-counted against `MAX_ARGS_SIZE_BYTES`.
+    /// See `packed_args` for the bit-packed storage encoding this
+    /// accounting is meant to reflect (Issue #775).
+    fn validate_args(env: &Env, args: &Vec<Val>) -> Result<(), Error> {
         let args_count = args.len();
 
         // Validate argument count
@@ -2036,10 +2043,8 @@ impl SoroTaskContract {
             return Err(Error::ArgsTooMany);
         }
 
-        // Estimate serialized size (each Val is at least 8 bytes + overhead)
-        // This is a conservative estimate since Val representation varies
-        let estimated_size = args_count * 64; // 64 bytes per Val as upper bound
-        if estimated_size > MAX_ARGS_SIZE_BYTES {
+        let serialized_size = args.to_xdr(env).len();
+        if serialized_size > MAX_ARGS_SIZE_BYTES {
             return Err(Error::ArgsTooLarge);
         }
 
@@ -2083,7 +2088,7 @@ impl SoroTaskContract {
         }
 
         // Validate payload arguments before storage
-        if let Err(e) = Self::validate_args(&config.args) {
+        if let Err(e) = Self::validate_args(&env, &config.args) {
             panic_with_error!(&env, e);
         }
 
@@ -4814,7 +4819,7 @@ impl SoroTaskContract {
             panic_with_error!(&env, Error::InvalidInterval);
         }
 
-        if let Err(e) = Self::validate_args(&new_config.args) {
+        if let Err(e) = Self::validate_args(&env, &new_config.args) {
             panic_with_error!(&env, e);
         }
 
