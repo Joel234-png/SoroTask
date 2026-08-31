@@ -17,6 +17,7 @@ const HistoryManager = require("./src/history");
 const { StreamHub } = require("./src/streamHub");
 const { ApiGateway } = require("./src/apiGateway");
 const { FailurePredictor, KeeperReputationScorer } = require("./src/insights");
+const { DeadLetterQueue } = require("./src/deadLetter");
 const { normalizeShardConfig, ConsistentHashRing, filterTasksByHashRing } = require("./src/sharding");
 const { PostgresShardManager } = require("./src/postgresShardManager");
 const { StartupValidator } = require("./src/validator");
@@ -87,6 +88,14 @@ async function main() {
     historyManager,
     logger: createLogger("reputation-scorer"),
   });
+  // Issue #783 — dead-letter queue. Already existed (quarantine after N
+  // consecutive failures, exponential backoff, webhook alerting) but had
+  // zero callers anywhere. Wired into executeTask below (record failures,
+  // auto-recover on success) and into the poll loop (skip quarantined
+  // tasks that aren't yet ready for their backoff retry).
+  const deadLetterQueue = new DeadLetterQueue({
+    logger: createLogger("dead-letter-queue"),
+  });
   const shardConfig = normalizeShardConfig({
     shardIndex: config.shardIndex,
     shardCount: config.shardCount,
@@ -104,7 +113,7 @@ async function main() {
   };
 
   const gasMonitor = new GasMonitor(createLogger("gasMonitor"));
-  const metricsServer = new MetricsServer(gasMonitor, createLogger("metrics"), null, {
+  const metricsServer = new MetricsServer(gasMonitor, createLogger("metrics"), deadLetterQueue, {
     port: config.metricsPort,
     healthStaleThreshold: config.healthStaleThresholdMs,
     historyManager,
@@ -438,6 +447,9 @@ async function main() {
         correlationId,
         txHash: retryResult.result?.txHash || null,
       });
+      if (deadLetterQueue.isQuarantined(taskId)) {
+        deadLetterQueue.recover(taskId, "execution_succeeded");
+      }
     } catch (error) {
       taskLogger.error("Failed to execute task", {
         taskId,
@@ -462,6 +474,12 @@ async function main() {
         attemptId: context.attemptId || null,
         correlationId,
         classification: error.classification || null,
+      });
+      deadLetterQueue.recordFailure(taskId, {
+        error: error.error || error,
+        errorClassification: error.classification || undefined,
+        txHash: error.result?.txHash || null,
+        phase: "execution",
       });
       throw error;
     }
@@ -821,22 +839,43 @@ async function main() {
       });
       dueCountThisCycle = dueTaskIds.length;
 
-      if (dueTaskIds.length > 0) {
+      // Issue #783: skip tasks the dead-letter queue has quarantined
+      // (repeatedly failing) unless they've become due for their next
+      // exponential-backoff retry attempt — this is what actually stops
+      // a broken task from consuming a poll slot every single cycle.
+      const quarantinedSkipped = [];
+      const executableTaskIds = dueTaskIds.filter((task) => {
+        const taskId = typeof task === "object" ? task.taskId : task;
+        if (!deadLetterQueue.isQuarantined(taskId)) return true;
+        if (deadLetterQueue.isReadyForRetry(taskId)) {
+          deadLetterQueue.recordRetryAttempt(taskId);
+          return true;
+        }
+        quarantinedSkipped.push(taskId);
+        return false;
+      });
+      if (quarantinedSkipped.length > 0) {
+        logger.info("Skipped quarantined tasks not yet ready for retry", {
+          taskIds: quarantinedSkipped,
+        });
+      }
+
+      if (executableTaskIds.length > 0) {
         const lockSnapshot = idempotencyGuard.getSnapshot();
         logger.info("Found due tasks, enqueueing for execution", {
-          dueCount: dueTaskIds.length,
+          dueCount: executableTaskIds.length,
         });
         logger.info("Execution idempotency state", {
           stateFile: lockSnapshot.stateFile,
           activeLocks: lockSnapshot.lockCount,
         });
 
-        dueTaskIds.forEach((task) =>
+        executableTaskIds.forEach((task) =>
           shutdownManager.trackTask(typeof task === "object" ? task.taskId : task)
         );
 
         // Transform the dueTask results to pass correlation IDs to the queue
-        const tasksToEnqueue = dueTaskIds.map(d => ({
+        const tasksToEnqueue = executableTaskIds.map(d => ({
           taskId: d.taskId,
           context: { pollCorrelationId: d.correlationId }
         }));
