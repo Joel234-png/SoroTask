@@ -27,6 +27,7 @@ const { GracefulShutdownManager } = require("./src/gracefulShutdown");
 const { TaskReconciler } = require("./src/reconciler");
 const { createDefaultFilterChain } = require("./src/taskFilter");
 const { getRedisClient } = require("./src/lock");
+const { computeAdaptivePollingInterval } = require("./src/adaptiveScheduler");
 
 // Create root logger for the main module
 const logger = createLogger("keeper");
@@ -225,10 +226,6 @@ async function main() {
   });
   logger.info("Poller initialized", { contractId: config.contractId });
 
-  // Initialize execution queue
-  const queue = new ExecutionQueue(undefined, metricsServer, { idempotencyGuard });
-  const queueLogger = createLogger("queue");
-  await queue.initialize();
   metricsServer.setReadinessProviders({
     redisClient: getRedisClient(),
     workerPool: queue,
@@ -713,7 +710,7 @@ async function main() {
   shutdownManager.on("shutdown:stop-accepting", () => {
     logger.info("Stopped accepting new work");
     // Stop the polling loops explicitly
-    clearInterval(pollingInterval);
+    clearTimeout(pollingTimer);
     clearInterval(reconcileInterval);
   });
 
@@ -739,14 +736,31 @@ async function main() {
 
   // Polling loop
   const pollingIntervalMs = config.pollIntervalMs;
-  logger.info("Starting polling loop", { 
+  logger.info("Starting polling loop", {
     intervalMs: pollingIntervalMs,
     shardId: config.shardId,
-    totalShards: config.totalShards
+    totalShards: config.totalShards,
+    adaptivePollingEnabled: config.adaptivePollingEnabled,
   });
 
+  // Issue #782: adaptive polling. computeAdaptivePollingInterval already
+  // existed (backlog/latency/error-aware, with anti-oscillation smoothing)
+  // but had no caller anywhere — the loop below was always a fixed-interval
+  // setInterval. Converted to a self-rescheduling setTimeout so the delay
+  // before the next cycle can actually vary; consecutivePollErrors and
+  // lastAdaptiveIntervalMs are the running state computeAdaptivePollingInterval
+  // needs across cycles (error backoff, smoothing against the previous interval).
+  let pollingTimer = null;
+  let consecutivePollErrors = 0;
+  let lastAdaptiveIntervalMs = pollingIntervalMs;
 
-  const pollingInterval = setInterval(async () => {
+
+  const runPollCycle = async () => {
+    const cycleStartedAt = Date.now();
+    let dueCountThisCycle = 0;
+    let backlogSizeThisCycle = 0;
+    let cycleErrored = false;
+
     // Don't accept new work during shutdown
     if (shutdownManager.state !== "running") {
       logger.debug("Skipping poll cycle during shutdown", {
@@ -771,6 +785,7 @@ async function main() {
 
       // Get list of all registered task IDs
       const taskIds = registry.getTaskIds();
+      backlogSizeThisCycle = taskIds.length;
       const dbShardState = dbShardManager.refresh({
         activeUsers: queue.getInFlightStatus().inFlight,
         pendingTasks: taskIds.length,
@@ -804,6 +819,7 @@ async function main() {
         idempotencyGuard,
         includeContext: true,
       });
+      dueCountThisCycle = dueTaskIds.length;
 
       if (dueTaskIds.length > 0) {
         const lockSnapshot = idempotencyGuard.getSnapshot();
@@ -836,9 +852,57 @@ async function main() {
       }
 
       } catch (error) {
+        cycleErrored = true;
         logger.error("Error in polling cycle", { error: error.message });
+      } finally {
+        consecutivePollErrors = cycleErrored
+          ? consecutivePollErrors + 1
+          : 0;
+
+        if (config.adaptivePollingEnabled) {
+          const cycleDurationMs = Date.now() - cycleStartedAt;
+          const { intervalMs, reasons } = computeAdaptivePollingInterval(
+            {
+              baseIntervalMs: pollingIntervalMs,
+              minIntervalMs: config.adaptivePollMinIntervalMs,
+              maxIntervalMs: config.adaptivePollMaxIntervalMs,
+              backlogSize: backlogSizeThisCycle,
+              dueCount: dueCountThisCycle,
+              // Not yet tracked: how many tasks are due soon (vs. right
+              // now) and the average RPC round-trip time. Neutral values
+              // below make computeAdaptivePollingInterval skip those
+              // adjustments entirely rather than fabricating signal.
+              dueSoonCount: 0,
+              minSecondsUntilDue: Infinity,
+              avgRpcLatencyMs: 0,
+              cycleDurationMs,
+              errors: consecutivePollErrors,
+            },
+            lastAdaptiveIntervalMs,
+          );
+          lastAdaptiveIntervalMs = intervalMs;
+          logger.debug("Adaptive polling interval computed", {
+            intervalMs,
+            reasons,
+            backlogSize: backlogSizeThisCycle,
+            dueCount: dueCountThisCycle,
+            cycleDurationMs,
+            consecutivePollErrors,
+          });
+        }
+
+        scheduleNextPoll();
       }
-    }, pollingIntervalMs);
+  };
+
+  function scheduleNextPoll() {
+    const nextDelayMs = config.adaptivePollingEnabled
+      ? lastAdaptiveIntervalMs
+      : pollingIntervalMs;
+    pollingTimer = setTimeout(runPollCycle, nextDelayMs);
+  }
+
+  scheduleNextPoll();
 
   // Run first poll immediately
   logger.info('Running initial poll');
