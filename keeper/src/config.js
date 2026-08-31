@@ -181,6 +181,16 @@ function loadConfig() {
       replayTtlMs: parseInteger(process.env.INBOUND_WEBHOOK_REPLAY_TTL_MS, 600000),
       maxBodyBytes: parseInteger(process.env.INBOUND_WEBHOOK_MAX_BODY_BYTES, 1048576),
     },
+    // Issue #781 — profitability gate. Defaults disabled: this changes
+    // existing keeper execution behavior (skipping tasks it would
+    // otherwise have executed), so it must be an explicit opt-in rather
+    // than silently active for every existing deployment on upgrade.
+    profitabilityGate: {
+      enabled: parseBoolean(process.env.PROFITABILITY_GATE_ENABLED, false),
+      // Minimum net profit (bounty - forecasted cost) required to proceed,
+      // in stroops. 0 means "skip only when forecast to run at a loss".
+      minNetProfitStroops: parseInteger(process.env.PROFITABILITY_MIN_NET_PROFIT_STROOPS, 0),
+    },
     // SLO threshold configuration
     sloThresholds: {
       stalePollSeconds: parseInteger(process.env.SLO_STALE_POLL_SECONDS, 30),

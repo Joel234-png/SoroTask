@@ -375,6 +375,14 @@ class ZKProofService extends EventEmitter {
   }
 
   /**
+   * Load-balance across the worker pool (Issue #791): picks the first idle
+   * worker entry and marks it active before dispatching a job to it.
+   *
+   * This method was called from `generateProof()` but was never defined —
+   * every `/generate-proof` request threw `this._acquireWorker is not a
+   * function` at runtime, meaning the worker pool below (which is otherwise
+   * fully implemented: spawn, crash-replace, timeout, memory limits) could
+   * never actually be reached.
    * Load-balance across the worker pool: picks the first idle worker entry
    * and marks it active before dispatching a job to it.
    *
