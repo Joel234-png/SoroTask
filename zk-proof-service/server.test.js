@@ -1,249 +1,198 @@
 const request = require('supertest');
-const { ZKProofService } = require('./index');
-const { createApp } = require('./server');
-const { generateECIESKeyPair, encryptWitnessECIES } = require('./lib/helpers');
+const { createServer } = require('./server');
 
-describe('server', () => {
-  let zkService;
-  let eciesKeys;
-
-  beforeEach(() => {
-    zkService = new ZKProofService(2);
-    zkService.initialize();
-    eciesKeys = generateECIESKeyPair();
-  });
-
-  afterEach(() => {
-    zkService.shutdown();
-  });
-
-  test('GET /health returns healthy status when worker pool is ready', async () => {
-    const app = createApp(zkService, { disableOpenApiValidation: true });
-    const response = await request(app).get('/health');
-
-    expect(response.status).toBe(200);
-    expect(response.body.status).toBe('healthy');
-    expect(response.body.version).toBe('1.0.0');
-    expect(response.body.workerPool).toEqual({
-      totalWorkers: 2,
-      idleWorkers: 2,
-      activeWorkers: 0,
+describe('strict OpenAPI request validation', () => {
+  test('rejects unknown request properties with RFC 7807', async () => {
+    const { app } = await createServer({ skipAttestation: true });
+    const response = await request(app).post('/generate-proof').send({
+      taskId: 1,
+      circuitId: 'circuit',
+      taskCondition: { type: 'threshold', params: {} },
+      clientData: { witness: { value: 1 } },
+      unexpected: true,
     });
-    expect(typeof response.body.uptimeSeconds).toBe('number');
-  });
-
-  test('GET /health returns unavailable when service is not initialized', async () => {
-    zkService.shutdown();
-    const app = createApp(zkService, { disableOpenApiValidation: true });
-    const response = await request(app).get('/health');
-
-    expect(response.status).toBe(503);
-    expect(response.body.status).toBe('unavailable');
-  });
-
-  test('GET /health reports queue depth and threshold', async () => {
-    const app = createApp(zkService, { queueDepthThreshold: 50 });
-    const response = await request(app).get('/health');
-
-    expect(response.status).toBe(200);
-    expect(response.body.queueDepth).toBe(0);
-    expect(response.body.queueDepthThreshold).toBe(50);
-  });
-
-  test('POST /generate-proof enqueues job and returns 202 with jobId', async () => {
-    const app = createApp(zkService, { disableOpenApiValidation: true });
-    const response = await request(app)
-      .post('/generate-proof')
-      .send({
-        taskId: 1,
-        circuitId: 'circuit-1',
-        taskCondition: 'condition-1',
-      });
-
-    expect(response.status).toBe(202);
-    expect(response.body.jobId).toBeDefined();
-    expect(response.body.status).toBe('queued');
-    expect(response.body.pollUrl).toBe(`/proofs/${response.body.jobId}`);
-  });
-
-  test('GET /proofs/:jobId returns job status', async () => {
-    const app = createApp(zkService, { disableOpenApiValidation: true });
-    const postRes = await request(app)
-      .post('/generate-proof')
-      .send({
-        taskId: 2,
-        circuitId: 'circuit-2',
-        taskCondition: 'condition-2',
-      });
-
-    const jobId = postRes.body.jobId;
-    const getRes = await request(app).get(`/proofs/${jobId}`);
-
-    expect(getRes.status).toBe(200);
-    expect(getRes.body.jobId).toBe(jobId);
-    expect(['queued', 'processing', 'completed', 'failed']).toContain(getRes.body.status);
-  });
-
-  test('GET /proofs/:jobId returns 404 for unknown job', async () => {
-    const app = createApp(zkService, { disableOpenApiValidation: true });
-    const response = await request(app).get('/proofs/non-existent-job-id');
-
-    expect(response.status).toBe(404);
-    expect(response.body.error).toBe('Job not found');
-  });
-
-  test('POST /generate-proof rejects invalid input', async () => {
-    const app = createApp(zkService, { disableOpenApiValidation: true });
-    const response = await request(app)
-      .post('/generate-proof')
-      .send({
-        taskId: 'not-a-number',
-      });
 
     expect(response.status).toBe(400);
-    expect(response.body.error).toBe('Invalid task parameters');
+    expect(response.headers['content-type']).toMatch(/application\/problem\+json/);
+    expect(response.body).toEqual(expect.objectContaining({
+      type: expect.stringMatching(/^https:\/\//),
+      title: expect.any(String),
+      status: 400,
+      detail: expect.any(String),
+    }));
   });
 
-  test('POST /generate-proof with ECIES encrypted payload decrypts successfully', async () => {
-    const app = createApp(zkService, { disableOpenApiValidation: true });
-    const sampleWitness = { secretValue: 42, signature: '0xabc' };
-    const encrypted = encryptWitnessECIES(sampleWitness, eciesKeys.publicKey);
-
-    const response = await request(app)
-      .post('/generate-proof')
-      .send({
-        taskId: 3,
-        circuitId: 'circuit-ecies',
-        taskCondition: 'condition-ecies',
-        encryptedWitness: encrypted,
-        privateKeyPem: eciesKeys.privateKey,
-      });
-
-    expect(response.status).toBe(202);
-    expect(response.body.jobId).toBeDefined();
-    expect(response.body.status).toBe('queued');
-  });
-
-  test('POST /generate-proof rejects invalid ECIES payload', async () => {
-    const app = createApp(zkService, { disableOpenApiValidation: true });
-    const response = await request(app)
-      .post('/generate-proof')
-      .send({
-        taskId: 4,
-        circuitId: 'circuit-ecies',
-        taskCondition: 'condition-ecies',
-        encryptedWitness: { iv: 'invalid', ephemeralPublicKey: 'invalid', ciphertext: 'invalid', mac: 'invalid' },
-        privateKeyPem: eciesKeys.privateKeyPem,
-      });
+  test('rejects malformed types before reaching the handler', async () => {
+    const { app } = await createServer({ skipAttestation: true });
+    const response = await request(app).post('/verify-proof').send({
+      taskId: 'not-an-integer',
+      circuitId: 'circuit',
+      taskCondition: { type: 'threshold', params: {} },
+      proof: { proofId: 'bad', pi_a: [], pi_b: [], pi_c: [], publicSignals: [] },
+    });
 
     expect(response.status).toBe(400);
-    expect(response.body.error).toBe('Invalid ECIES encrypted payload or decryption failure');
+    expect(response.headers['content-type']).toMatch(/application\/problem\+json/);
   });
 
-  test('GET /proofs/:jobId/stream returns SSE stream for proof progress', async () => {
-    const app = createApp(zkService, { disableOpenApiValidation: true, adminApiToken: 'test-token' });
-    const postRes = await request(app)
-      .post('/generate-proof')
-      .send({
-        taskId: 5,
-        circuitId: 'circuit-sse',
-        taskCondition: 'condition-sse',
-      });
+  test('POST /generate-proof enforces 10 req/min rate limit per IP and returns HTTP 429 with Retry-After header', async () => {
+    const mockZkService = {
+      isReady: true,
+      getWorkerPoolStatus: () => ({ totalWorkers: 4, activeWorkers: 0, idleWorkers: 4 }),
+      generateProof: async () => ({
+        proofId: 'test-proof-1',
+        pi_a: ['0x01', '0x02'],
+        pi_b: [['0x03', '0x04'], ['0x05', '0x06']],
+        pi_c: ['0x07', '0x08'],
+        publicSignals: ['0x09'],
+      }),
+      enqueueAsyncJob: () => ({ jobId: 'job-1', status: 'queued', createdAt: new Date().toISOString() }),
+    };
+    const { app } = await createServer({ zkService: mockZkService, skipAttestation: true });
+    const payload = {
+      taskId: 1,
+      circuitId: 'liquidity-threshold-v1',
+      taskCondition: { type: 'liquidity-threshold', params: { minLiquidity: 100 } },
+      clientData: { witness: { actualLiquidity: 500 } },
+    };
 
-    const jobId = postRes.body.jobId;
+    // Send 10 valid requests
+    for (let i = 0; i < 10; i++) {
+      const res = await request(app).post('/generate-proof').send(payload);
+      expect([200, 202]).toContain(res.status);
+    }
 
-    const streamRes = await request(app)
-      .get(`/proofs/${jobId}/stream`)
-      .set('Authorization', 'Bearer test-token');
-
-    expect(streamRes.headers['content-type']).toContain('text/event-stream');
-    expect(streamRes.text).toContain('event: status');
-  });
-});
-
-describe('halo2 proof gateway (Issue #851)', () => {
-  let zkService;
-  const baseBody = {
-    taskId: 7,
-    circuitId: 'universal-setup-v1',
-    taskCondition: 'solvency-gt-100',
-    clientData: { witness: { actualLiquidity: 500 } },
-  };
-
-  beforeEach(() => {
-    zkService = new ZKProofService(2);
-    zkService.initialize();
-  });
-
-  afterEach(() => {
-    zkService.shutdown();
+    // 11th request must be rate limited with 429 Too Many Requests
+    const rateLimitedRes = await request(app).post('/generate-proof').send(payload);
+    expect(rateLimitedRes.status).toBe(429);
+    expect(rateLimitedRes.headers['retry-after']).toBeDefined();
+    expect(rateLimitedRes.body.error.code).toBe('RATE_LIMIT_EXCEEDED');
   });
 
-  test('POST /generate-proof/halo2 accepts valid request and returns proof metadata', async () => {
-    const app = createApp(zkService, { disableOpenApiValidation: true });
-    const res = await request(app)
-      .post('/generate-proof/halo2')
-      .send({ ...baseBody, scheme: 'kzg' });
+  test('POST /generate-proof/plonk and /verify-proof/plonk handle PLONK scheme proof generation and verification', async () => {
+    const mockZkService = {
+      isReady: true,
+      getWorkerPoolStatus: () => ({ totalWorkers: 4, activeWorkers: 0, idleWorkers: 4 }),
+      generateProof: async () => ({
+        proofId: 'test-plonk-1',
+        pi_a: ['0x01', '0x02'],
+        pi_b: [['0x03', '0x04'], ['0x05', '0x06']],
+        pi_c: ['0x07', '0x08'],
+        publicSignals: ['0x09'],
+      }),
+    };
+    const { app } = await createServer({ zkService: mockZkService, skipAttestation: true });
+    const payload = {
+      taskId: 1,
+      circuitId: 'plonk-circuit-v1',
+      taskCondition: { type: 'liquidity-threshold', params: { minLiquidity: 100 } },
+      clientData: { witness: { actualLiquidity: 500 } },
+    };
 
+    const genRes = await request(app).post('/generate-proof/plonk').send(payload);
+    expect(genRes.status).toBe(200);
+    expect(genRes.body.provingScheme).toBe('plonk');
+    expect(genRes.body.srs).toBe('universal-srs-21-powers');
+
+    const verifyRes = await request(app).post('/verify-proof/plonk').send({
+      taskId: 1,
+      circuitId: 'plonk-circuit-v1',
+      taskCondition: payload.taskCondition,
+      proof: genRes.body.proof,
+    });
+    expect(verifyRes.status).toBe(200);
+    expect(verifyRes.body.valid).toBe(true);
+    expect(verifyRes.body.provingScheme).toBe('plonk');
+  });
+
+  test('POST /proofs/async returns 202 with an immediate job_id and queued status', async () => {
+    const { EventEmitter } = require('events');
+    const zkService = new EventEmitter();
+    zkService.isReady = true;
+    zkService.initialize = () => {};
+    zkService.getWorkerPoolStatus = () => ({ totalWorkers: 4, activeWorkers: 0, idleWorkers: 4 });
+    zkService.enqueueAsyncJob = () => ({ jobId: 'job-abc', status: 'queued', createdAt: new Date().toISOString() });
+    zkService.getAsyncJob = async () => null;
+    zkService.proofCache = { get: async () => null, set: async () => {}, close: async () => {} };
+    zkService.proverQueue = { close: async () => {} };
+
+    const { app } = await createServer({ zkService, skipAttestation: true, skipInitialize: true });
+    const res = await request(app).post('/proofs/async').send({
+      taskId: 1,
+      circuitId: 'liquidity-threshold-v1',
+      taskCondition: { type: 'liquidity-threshold', params: { minLiquidity: 100 } },
+      clientData: { witness: { actualLiquidity: 500 } },
+    });
+
+    expect(res.status).toBe(202);
+    expect(res.body.jobId).toBe('job-abc');
+    expect(res.body.status).toBe('queued');
+  });
+
+  test('GET /proofs/:job_id/stream pushes progress then the final proof payload over SSE', async () => {
+    const { EventEmitter } = require('events');
+    const zkService = new EventEmitter();
+    zkService.isReady = true;
+    zkService.initialize = () => {};
+    zkService.getWorkerPoolStatus = () => ({ totalWorkers: 4, activeWorkers: 0, idleWorkers: 4 });
+
+    const job = {
+      jobId: 'job-sse',
+      status: 'queued',
+      progress: 0,
+      result: null,
+      error: null,
+      createdAt: new Date().toISOString(),
+    };
+    zkService.getAsyncJob = async () => job;
+    zkService.enqueueAsyncJob = () => ({ jobId: 'job-sse', status: 'queued', createdAt: job.createdAt });
+    zkService.proofCache = { get: async () => null, set: async () => {}, close: async () => {} };
+    zkService.proverQueue = { close: async () => {} };
+
+    const { app } = await createServer({ zkService, skipAttestation: true, skipInitialize: true });
+
+    setTimeout(() => {
+      job.status = 'processing';
+      job.progress = 55;
+      zkService.emit('jobProgress', { jobId: 'job-sse', status: 'processing', progress: 55 });
+    }, 20);
+    setTimeout(() => {
+      job.status = 'completed';
+      job.progress = 100;
+      job.result = {
+        proofId: 'proof-sse',
+        status: 'success',
+        conditionHash: '0xabc123',
+        proof: { pi_a: [], pi_b: [], pi_c: [], publicSignals: [] },
+      };
+      zkService.emit('jobComplete', job);
+    }, 70);
+
+    const res = await request(app).get('/proofs/job-sse/stream');
     expect(res.status).toBe(200);
-    expect(res.body.status).toBe('COMPLETED');
-    expect(res.body.scheme).toBe('kzg');
-    expect(res.body.proof).toBeDefined();
+    expect(res.headers['content-type']).toMatch(/text\/event-stream/);
+    expect(res.text).toContain('event: status');
+    expect(res.text).toContain('"status":"queued"');
+    expect(res.text).toContain('event: progress');
+    expect(res.text).toContain('"progress":55');
+    expect(res.text).toContain('event: complete');
+    expect(res.text).toContain('"proofId":"proof-sse"');
   });
 
-  test('POST /generate-proof/halo2 rejects invalid circuit inputs', async () => {
-    const app = createApp(zkService, { disableOpenApiValidation: true });
-    const res = await request(app)
-      .post('/generate-proof/halo2')
-      .send({
-        ...baseBody,
-        scheme: 'kzg',
-        clientData: { witness: { actualLiquidity: { nested: 'not-a-field-element' } } },
-      });
+  test('rejects malformed POST /proofs/async body with RFC 7807 before reaching the handler', async () => {
+    const mockZkService = {
+      isReady: true,
+      getWorkerPoolStatus: () => ({ totalWorkers: 4, activeWorkers: 0, idleWorkers: 4 }),
+    };
+    const { app } = await createServer({ zkService: mockZkService, skipAttestation: true });
+    const res = await request(app).post('/proofs/async').send({
+      taskId: 'not-an-integer',
+      hello: 'world',
+    });
 
     expect(res.status).toBe(400);
-    expect(res.body.error.code).toBe('INVALID_CIRCUIT_INPUT');
-  });
-
-  test('POST /verify-proof/halo2 verifies a proof produced by the gateway', async () => {
-    const app = createApp(zkService, { disableOpenApiValidation: true });
-    const gen = await request(app)
-      .post('/generate-proof/halo2')
-      .send({ ...baseBody, scheme: 'kzg' });
-
-    const res = await request(app)
-      .post('/verify-proof/halo2')
-      .send({
-        taskId: 7,
-        circuitId: 'universal-setup-v1',
-        scheme: 'kzg',
-        taskCondition: baseBody.taskCondition,
-        proof: gen.body.proof,
-      });
-
-    expect(res.status).toBe(200);
-    expect(res.body.valid).toBe(true);
-    expect(res.body.isMock).toBe(true);
-  });
-
-  test('POST /verify-proof/halo2 rejects a scheme mismatch between request and proof', async () => {
-    const app = createApp(zkService, { disableOpenApiValidation: true });
-    const gen = await request(app)
-      .post('/generate-proof/halo2')
-      .send({ ...baseBody, scheme: 'kzg' });
-
-    const res = await request(app)
-      .post('/verify-proof/halo2')
-      .send({
-        taskId: 7,
-        circuitId: 'universal-setup-v1',
-        scheme: 'ipa',
-        taskCondition: baseBody.taskCondition,
-        proof: gen.body.proof,
-      });
-
-    expect(res.status).toBe(200);
-    expect(res.body.valid).toBe(false);
-    expect(res.body.verificationDetails.reason).toMatch(/does not match/);
+    expect(res.headers['content-type']).toMatch(/application\/problem\+json/);
+    expect(res.body.status).toBe(400);
+    expect(res.body.errors).toBeDefined();
   });
 });

@@ -160,9 +160,60 @@ pub struct DelegationPoolEvent {
     pub timestamp: u64,
 }
 
+/// Event payload for user fee discount tier progression
+#[contracttype]
+#[derive(Clone, Debug)]
+pub struct FeeDiscountTierUpdatedEvent {
+    pub creator: Address,
+    pub old_tier: u32,
+    pub new_tier: u32,
+    pub total_executions: u64,
+/// Event payload for oracle volatility breaches
+#[contracttype]
+#[derive(Clone, Debug)]
+pub struct OracleVolatilityBreachEvent {
+    pub previous_price: i128,
+    pub new_price: i128,
+    pub volatility_bps: u32,
+    pub max_volatility_bps: u32,
+    pub timestamp: u64,
+}
+
+/// Event payload for unpausing volatility circuit breaker
+#[contracttype]
+#[derive(Clone, Debug)]
+pub struct VolatilityCircuitBreakerUnpausedEvent {
+    pub admin: Address,
+    pub timestamp: u64,
+}
+
 pub struct EventLogger;
 
 impl EventLogger {
+    /// Logs a user fee discount tier update
+    pub fn log_fee_discount_tier_updated(
+        env: &Env,
+        creator: Address,
+        old_tier: u32,
+        new_tier: u32,
+        total_executions: u64,
+    ) {
+        let timestamp = env.ledger().timestamp();
+        let event_data = FeeDiscountTierUpdatedEvent {
+            creator: creator.clone(),
+            old_tier,
+            new_tier,
+            total_executions,
+            timestamp,
+        };
+
+        let topics = (
+            Symbol::new(env, "sorotask"),
+            Symbol::new(env, "fee_discount_tier"),
+            creator,
+        );
+        env.events().publish(topics, event_data);
+    }
     /// Logs a state change for off-chain indexers
     pub fn log_state_change(
         env: &Env,
@@ -378,6 +429,43 @@ impl EventLogger {
             Symbol::new(env, "sorotask"),
             Symbol::new(env, "delegation_pool"),
             action,
+        );
+        env.events().publish(topics, event_data);
+    }
+
+    pub fn log_oracle_volatility_breach(
+        env: &Env,
+        previous_price: i128,
+        new_price: i128,
+        volatility_bps: u32,
+        max_volatility_bps: u32,
+    ) {
+        let timestamp = env.ledger().timestamp();
+        let event_data = OracleVolatilityBreachEvent {
+            previous_price,
+            new_price,
+            volatility_bps,
+            max_volatility_bps,
+            timestamp,
+        };
+
+        let topics = (
+            Symbol::new(env, "sorotask"),
+            Symbol::new(env, "volatility_breach"),
+        );
+        env.events().publish(topics, event_data);
+    }
+
+    pub fn log_volatility_circuit_breaker_unpaused(env: &Env, admin: Address) {
+        let timestamp = env.ledger().timestamp();
+        let event_data = VolatilityCircuitBreakerUnpausedEvent {
+            admin,
+            timestamp,
+        };
+
+        let topics = (
+            Symbol::new(env, "sorotask"),
+            Symbol::new(env, "volatility_unpaused"),
         );
         env.events().publish(topics, event_data);
     }
